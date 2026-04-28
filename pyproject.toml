@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lerobot-attention-visualizer"
+version = "0.1.0"
+description = "Stream attention / activation heatmaps from lerobot policies to rerun, live or from a recorded dataset."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "lerobot==0.5.0",
+    "numpy",
+    "rerun-sdk",
+    "torch",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["lerobot_attention_visualizer"]
