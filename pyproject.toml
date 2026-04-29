@@ -7,7 +7,19 @@ name = "lerobot-attention-visualizer"
 version = "0.1.0"
 description = "Stream attention / activation heatmaps from lerobot policies to rerun, live or from a recorded dataset."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "Lucas Wendland", email = "mtglucas1@gmail.com" }]
+keywords = ["lerobot", "robotics", "interpretability", "attention", "rerun", "visualization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
 dependencies = [
     "lerobot==0.5.0",
     "numpy",
@@ -15,5 +27,24 @@ dependencies = [
     "torch",
 ]
 
+[project.urls]
+Homepage = "https://github.com/CursedRock17/lerobot_attention_visualizer"
+Repository = "https://github.com/CursedRock17/lerobot_attention_visualizer"
+"Bug Tracker" = "https://github.com/CursedRock17/lerobot_attention_visualizer/issues"
+
+[project.optional-dependencies]
+# Policy extras — pull lerobot's matching extras transitively. ACT has no
+# extra (it's in core lerobot), so there's no `act` key here.
+smolvla = ["lerobot[smolvla]==0.5.0"]
+pi = ["lerobot[pi]==0.5.0"]
+wallx = ["lerobot[wallx]==0.5.0"]
+xvla = ["lerobot[xvla]==0.5.0"]
+# Robot / camera extras.
+feetech = ["lerobot[feetech]==0.5.0"]
+aloha = ["lerobot[aloha]==0.5.0"]
+intelrealsense = ["lerobot[intelrealsense]==0.5.0"]
+# Everything lerobot ships.
+all = ["lerobot[all]==0.5.0"]
+
 [tool.hatch.build.targets.wheel]
-packages = ["lerobot_attention_visualizer"]
+packages = ["src/lerobot_attention_visualizer"]
