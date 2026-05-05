@@ -1,6 +1,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from .policies.act import ACTAttention, ACTBackboneCapture
+from .policies.pi0 import Pi05Attention, Pi0Attention, Pi0FastAttention
 from .policies.smolvla import SmolVLAAttention, VisionAttentionCapture
 from .visualizer.overlay import (
     log_attention_overlay,
@@ -17,6 +18,9 @@ except PackageNotFoundError:
 __all__ = [
     "ACTAttention",
     "ACTBackboneCapture",
+    "Pi05Attention",
+    "Pi0Attention",
+    "Pi0FastAttention",
     "SmolVLAAttention",
     "VisionAttentionCapture",
     "__version__",

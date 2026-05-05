@@ -1,9 +1,8 @@
 """Evaluate SmolVLA with Real-Time Chunking AND attention overlays.
 
-Mirrors `smolvla/evaluate.py` but wraps the policy with a
-`VisionAttentionCapture` on the SigLIP vision encoder. After every chunk
-request we log an attention-rollout heatmap per camera to rerun, so you can
-watch where the vision encoder is focused while the policy drives the arm.
+Mirrors `smolvla/evaluate.py` but wraps the policy with `SmolVLAAttention`,
+so the SigLIP vision encoder's per-camera attention rollout streams to rerun
+alongside the raw image while the policy drives the arm.
 
 This is a read-only extension — toggling the capture off (set
 ATTENTION_ENABLED = False) gives you the same control loop as smolvla/evaluate.py.
@@ -11,12 +10,12 @@ ATTENTION_ENABLED = False) gives you the same control loop as smolvla/evaluate.p
 
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
-import numpy as np
-import rerun as rr
 import torch
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
@@ -34,12 +33,7 @@ from lerobot.utils.control_utils import init_keyboard_listener
 from lerobot.utils.utils import log_say
 from lerobot.utils.visualization_utils import init_rerun
 
-from lerobot_attention_visualizer import (
-    VisionAttentionCapture,
-    log_attention_overlay,
-    patch_heatmap_to_image,
-    rollout_to_patch_heatmap,
-)
+from lerobot_attention_visualizer import SmolVLAAttention
 
 # Configuration
 HF_USER = "CursedRock17"
@@ -124,50 +118,14 @@ latency_tracker = LatencyTracker(maxlen=20)
 time_per_chunk = 1.0 / CONTROL_FPS
 shutdown_event = threading.Event()
 
-# SigLIP encoder inside the VLM — this is where we hook Q/K projections.
-vision_model = policy.model.vlm_with_expert.get_vlm_model().vision_model
-capture = VisionAttentionCapture(vision_model)
-# Holds the original embed_image bound method so we can restore it on shutdown.
-_orig_embed_image = None
+# Wraps the policy: hooks SigLIP Q/K and freezes a snapshot per embed_image call
+# inside predict_action_chunk (zero GPU compute on the hot path). log_overlay
+# computes rollouts + streams to rerun AFTER merge() has fired.
+viz = SmolVLAAttention(policy) if ATTENTION_ENABLED else contextlib.nullcontext()
 
-
-def _camera_keys_in_policy_order() -> list[str]:
-    """Return the raw camera keys (e.g. "top", "wrist.top") in the same order
-    `prepare_images` feeds them into the vision encoder."""
-    prefix = "observation.images."
-    keys = []
-    for k in policy.config.image_features:
-        if k.startswith(prefix):
-            keys.append(k[len(prefix) :])
-    return keys
-
-
-def _log_attention_for_obs(obs: dict) -> None:
-    """Consume capture.rollouts (one entry per camera) and overlay on the raw
-    camera images. Must be called exactly once per predict_action_chunk."""
-    # Camera order here matches the order embed_image was called during forward.
-    camera_keys = _camera_keys_in_policy_order()
-    if len(capture.rollouts) != len(camera_keys):
-        # Fewer rollouts than cameras — usually means a hook was missed. Skip
-        # this frame rather than misalign the overlay.
-        capture.rollouts.clear()
-        return
-
-    for cam_key, rollout in zip(camera_keys, capture.rollouts, strict=True):
-        # Raw obs dict uses the bare camera name ("top"), not the feature key.
-        image = obs.get(cam_key)
-        if image is None:
-            continue
-        if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
-            continue
-
-        # (seq, seq) rollout → (patch_h, patch_w) per-patch importance.
-        patch_heat = rollout_to_patch_heatmap(rollout)
-        # Upsample the patch grid to the full camera resolution for overlay.
-        heat = patch_heatmap_to_image(patch_heat, target_hw=image.shape[:2])
-        log_attention_overlay(f"attention/{cam_key}", image, heat)
-
-    capture.rollouts.clear()
+# Single-worker pool so rerun serialization runs off the inference thread.
+# max_workers=1 keeps frames in order and bounds memory (one frame queued at a time).
+_log_executor = ThreadPoolExecutor(max_workers=1) if ATTENTION_ENABLED else None
 
 
 def get_actions_loop():
@@ -199,7 +157,7 @@ def get_actions_loop():
         )
         obs_frame = preprocessor(obs_frame)
 
-        # Each embed_image call inside this forward triggers capture.snapshot().
+        # Each embed_image call inside this forward triggers viz to snapshot a rollout.
         actions = policy.predict_action_chunk(
             obs_frame,
             inference_delay=inference_delay,
@@ -216,9 +174,12 @@ def get_actions_loop():
         # RTC blends the new chunk into the queue at the correct offset.
         action_queue.merge(original_actions, post_actions, real_delay, idx_before)
 
-        # Overlay the captured rollouts on the raw camera frames via rerun.
         if ATTENTION_ENABLED:
-            _log_attention_for_obs(obs)
+            # drain_rollouts() + rr.log() happen in the background thread so
+            # rerun serialization (~100ms for two 640×480 cameras) doesn't stall
+            # the next inference iteration. Pass a copy of obs so the inference
+            # thread can immediately overwrite it on the next get_observation().
+            _log_executor.submit(viz.log_overlay, dict(obs))
 
 
 def actor_loop():
@@ -245,39 +206,22 @@ log_say(
 )
 
 try:
-    if ATTENTION_ENABLED:
-        # Install q_proj / k_proj forward hooks on every SigLIP attention layer.
-        capture.__enter__()
+    with viz:
+        inference_thread = threading.Thread(target=get_actions_loop, daemon=True)
+        control_thread = threading.Thread(target=actor_loop, daemon=True)
+        inference_thread.start()
+        control_thread.start()
 
-        # `embed_image` is a method on SmolVLMWithExpertModel, not an nn.Module
-        # submodule, so forward_hook doesn't apply — monkey-patch the bound
-        # method. After each call (one per camera per chunk) we snapshot the
-        # rollout and reset the Q/K cache.
-        _orig_embed_image = policy.model.vlm_with_expert.embed_image
-
-        def _patched_embed_image(image):
-            # Run the original encoder forward, then freeze its attention rollout.
-            out = _orig_embed_image(image)
-            capture.snapshot()
-            return out
-
-        policy.model.vlm_with_expert.embed_image = _patched_embed_image
-
-    inference_thread = threading.Thread(target=get_actions_loop, daemon=True)
-    control_thread = threading.Thread(target=actor_loop, daemon=True)
-    inference_thread.start()
-    control_thread.start()
-
-    for episode_idx in range(NUM_EPISODES):
-        if events["stop_recording"]:
-            break
-        log_say(f"Eval episode {episode_idx + 1}/{NUM_EPISODES}")
-
-        episode_end = time.perf_counter() + EPISODE_TIME_SEC
-        while time.perf_counter() < episode_end:
+        for episode_idx in range(NUM_EPISODES):
             if events["stop_recording"]:
                 break
-            time.sleep(0.05)
+            log_say(f"Eval episode {episode_idx + 1}/{NUM_EPISODES}")
+
+            episode_end = time.perf_counter() + EPISODE_TIME_SEC
+            while time.perf_counter() < episode_end:
+                if events["stop_recording"]:
+                    break
+                time.sleep(0.05)
 
 except KeyboardInterrupt:
     log_say("Interrupted by user")
@@ -289,8 +233,7 @@ finally:
         control_thread.join(timeout=5.0)
     except NameError:
         pass
-    if ATTENTION_ENABLED and _orig_embed_image is not None:
-        policy.model.vlm_with_expert.embed_image = _orig_embed_image
-        capture.__exit__(None, None, None)
+    if _log_executor is not None:
+        _log_executor.shutdown(wait=True)
     follower.disconnect()
     log_say("Evaluation finished")

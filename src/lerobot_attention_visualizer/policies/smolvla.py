@@ -118,10 +118,12 @@ class VisionAttentionCapture:
         return hits
 
     def __enter__(self) -> VisionAttentionCapture:
-        # One per-layer slot for Q/K caches.
+        # One per-layer slot for live Q/K caches (overwritten each forward).
         self._layers = [_LayerCache() for _ in self._attn_modules]
-        # One rollout per completed vision-encoder forward (i.e. per camera).
-        self.rollouts: list[torch.Tensor] = []
+        # Frozen snapshots — one list-of-LayerCaches per embed_image call.
+        # Rollout compute is deferred to drain_rollouts() so it doesn't run
+        # inside predict_action_chunk and inflate real_latency for the RTC queue.
+        self._pending: list[list[_LayerCache]] = []
 
         for idx, attn in enumerate(self._attn_modules):
             # Introspect head layout — HF attention modules all expose these.
@@ -195,53 +197,86 @@ class VisionAttentionCapture:
 
         scale = cache.head_dim**-0.5
         logits = torch.matmul(q, k.transpose(-1, -2)) * scale
-        return F.softmax(logits, dim=-1)
+        # SiglipAttention does softmax in float32; match that for numerical
+        # consistency across the 729-token sequence (bf16 precision is marginal).
+        return F.softmax(logits.float(), dim=-1)
 
-    def snapshot(self, add_residual: bool = True) -> torch.Tensor:
-        """Compute rollout for the most recent vision-encoder forward, stash it
-        in `self.rollouts`, and reset the Q/K cache so the next forward starts
-        fresh. Call this from a forward hook on `embed_image`.
+    def snapshot(self) -> None:
+        """Freeze the current Q/K tensors into _pending and reset the live caches.
+
+        Intentionally cheap — no GPU compute. Called inside _patched_embed_image
+        (inside predict_action_chunk) so it does not inflate the real_latency that
+        the RTC queue uses to align action chunks. Rollout compute is deferred to
+        drain_rollouts(), which log_overlay() calls after merge() has already fired.
         """
-        rollout = self.attention_rollout(add_residual=add_residual)
-        self.rollouts.append(rollout)
-        for cache in self._layers:
-            cache.q = None
-            cache.k = None
-        return rollout
+        self._pending.append([
+            _LayerCache(q=c.q, k=c.k, num_heads=c.num_heads, head_dim=c.head_dim)
+            for c in self._layers
+        ])
+        for c in self._layers:
+            c.q = None
+            c.k = None
 
-    def attention_rollout(self, add_residual: bool = True) -> torch.Tensor:
-        """Attention rollout (Abnar & Zuidema 2020) across all captured layers.
+    def drain_rollouts(
+        self,
+        last_layer_only: bool = False,
+        add_residual: bool = True,
+    ) -> list[torch.Tensor]:
+        """Compute rollouts from all pending snapshots, clear them, and return the list.
 
-        Returns a (B, seq, seq) tensor where entry [b, i, j] approximates how
-        much token j contributed to token i's final representation.
+        One tensor per embed_image call (i.e. per camera). Call this from
+        log_overlay() — after merge() — so the matmul+softmax compute does not
+        contribute to real_latency.
+        """
+        pending, self._pending = self._pending, []
+        results: list[torch.Tensor] = []
+        for caches in pending:
+            if last_layer_only:
+                results.append(self._last_layer_from_caches(caches))
+            else:
+                results.append(self._rollout_from_caches(caches, add_residual))
+        return results
 
-        Streamed: each layer's (B, H, S, S) tensor is built, head-averaged,
-        residual-folded, and matmul'd into the running rollout, then dropped
-        before the next layer — peak memory is O(S²) instead of O(L·H·S²).
+    def _rollout_from_caches(
+        self, caches: list[_LayerCache], add_residual: bool
+    ) -> torch.Tensor:
+        """Attention rollout (Abnar & Zuidema 2020) over an explicit list of caches.
+
+        Streamed: O(S²) peak memory. Returns (B, seq, seq).
         """
         rollout: torch.Tensor | None = None
         eye: torch.Tensor | None = None
-
-        for cache in self._layers:
+        for cache in caches:
             probs = self._layer_attention(cache)
             if probs is None:
                 continue
-
             a = probs.mean(dim=1)  # (B, seq, seq), head-averaged
             if add_residual:
-                # Residual connection contributes identity each layer.
                 if eye is None or eye.shape[-1] != a.shape[-1]:
                     eye = torch.eye(a.shape[-1], device=a.device, dtype=a.dtype)
                 a = a + eye
                 a = a / a.sum(dim=-1, keepdim=True)
-
             rollout = a if rollout is None else torch.matmul(a, rollout)
-            # Free the per-layer tensors before the next iteration.
             del probs, a
-
         if rollout is None:
             raise RuntimeError("No attentions captured — did you run a forward inside the context?")
         return rollout
+
+    def _last_layer_from_caches(self, caches: list[_LayerCache]) -> torch.Tensor:
+        """Head-averaged attention from the last non-empty layer of an explicit cache list."""
+        for cache in reversed(caches):
+            probs = self._layer_attention(cache)
+            if probs is not None:
+                return probs.mean(dim=1)  # (B, seq, seq)
+        raise RuntimeError("No attentions captured — did you run a forward inside the context?")
+
+    def attention_rollout(self, add_residual: bool = True) -> torch.Tensor:
+        """Attention rollout across the LIVE layer caches (for direct use of the low-level API).
+
+        Users who call VisionAttentionCapture directly (not through SmolVLAAttention)
+        can call this after a forward pass to get the rollout from self._layers.
+        """
+        return self._rollout_from_caches(self._layers, add_residual)
 
 
 class SmolVLAAttention:
@@ -262,8 +297,9 @@ class SmolVLAAttention:
             viz.log_overlay(obs)
     """
 
-    def __init__(self, policy: "SmolVLAPolicy"):
+    def __init__(self, policy: "SmolVLAPolicy", *, last_layer_only: bool = False):
         self.policy = policy
+        self._last_layer_only = last_layer_only
         # Reach the SigLIP encoder buried inside the VLM.
         vision_model = policy.model.vlm_with_expert.get_vlm_model().vision_model
         self._capture = VisionAttentionCapture(vision_model)
@@ -282,7 +318,7 @@ class SmolVLAAttention:
 
         def _patched_embed_image(image):
             out = self._orig_embed_image(image)
-            self._capture.snapshot()
+            self._capture.snapshot()  # cheap freeze only — no GPU compute here
             return out
 
         self.policy.model.vlm_with_expert.embed_image = _patched_embed_image
@@ -305,14 +341,17 @@ class SmolVLAAttention:
         ]
 
     def log_overlay(self, obs: dict, *, prefix: str = "attention") -> None:
-        """Drain captured rollouts and stream image / heatmap / overlay per camera.
+        """Compute rollouts from pending snapshots, then stream image / heatmap / overlay per camera.
 
-        No-op if no forward happened since the last call. If the rollout count
-        drifts from the camera count (a missed hook), we drop the frame rather
-        than misalign overlays.
+        No-op if no forward happened since the last call. Rollout compute (matmul
+        + softmax) happens HERE — after merge() has already fired — so it does not
+        inflate real_latency and disturb the RTC queue alignment.
+
+        If the rollout count drifts from the camera count (a missed hook), we drop
+        the frame rather than misalign overlays.
         """
-        rollouts = list(self._capture.rollouts)
-        self._capture.rollouts.clear()
+        # Compute rollouts now, outside the timed inference window.
+        rollouts = self._capture.drain_rollouts(last_layer_only=self._last_layer_only)
         if not rollouts:
             return
 
@@ -325,8 +364,6 @@ class SmolVLAAttention:
             image = obs.get(cam_key)
             if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
                 continue
-            # (seq, seq) rollout → (patch_h, patch_w) per-patch importance.
             patch_heat = rollout_to_patch_heatmap(rollout)
-            # Upsample the patch grid to full camera resolution.
             heat = patch_heatmap_to_image(patch_heat, target_hw=image.shape[:2])
             log_attention_overlay(f"{prefix}/{cam_key}", image, heat)

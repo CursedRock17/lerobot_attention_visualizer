@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lerobot-attention-visualizer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stream attention / activation heatmaps from lerobot policies to rerun, live or from a recorded dataset."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "lerobot==0.5.0",
+    "lerobot>=0.5.0,<0.6.0",
     "numpy",
     "rerun-sdk",
     "torch",
@@ -35,16 +35,23 @@ Repository = "https://github.com/CursedRock17/lerobot_attention_visualizer"
 [project.optional-dependencies]
 # Policy extras — pull lerobot's matching extras transitively. ACT has no
 # extra (it's in core lerobot), so there's no `act` key here.
-smolvla = ["lerobot[smolvla]==0.5.0"]
-pi = ["lerobot[pi]==0.5.0"]
-wallx = ["lerobot[wallx]==0.5.0"]
-xvla = ["lerobot[xvla]==0.5.0"]
+smolvla = ["lerobot[smolvla]>=0.5.0,<0.6.0"]
+pi = ["lerobot[pi]>=0.5.0,<0.6.0"]
+wallx = ["lerobot[wallx]>=0.5.0,<0.6.0"]
+xvla = ["lerobot[xvla]>=0.5.0,<0.6.0"]
 # Robot / camera extras.
-feetech = ["lerobot[feetech]==0.5.0"]
-aloha = ["lerobot[aloha]==0.5.0"]
-intelrealsense = ["lerobot[intelrealsense]==0.5.0"]
+feetech = ["lerobot[feetech]>=0.5.0,<0.6.0"]
+aloha = ["lerobot[aloha]>=0.5.0,<0.6.0"]
+intelrealsense = ["lerobot[intelrealsense]>=0.5.0,<0.6.0"]
 # Everything lerobot ships.
-all = ["lerobot[all]==0.5.0"]
+all = ["lerobot[all]>=0.5.0,<0.6.0"]
+# Development tooling — pytest only for now; tests are self-contained and
+# don't require any of the policy extras.
+dev = ["pytest>=7.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lerobot_attention_visualizer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

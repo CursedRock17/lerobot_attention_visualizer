@@ -1,4 +1,9 @@
-from .act import ACTBackboneCapture
-from .smolvla import VisionAttentionCapture
+from .act import ACTAttention, ACTBackboneCapture
+from .smolvla import SmolVLAAttention, VisionAttentionCapture
 
-__all__ = ["ACTBackboneCapture", "VisionAttentionCapture"]
+__all__ = [
+    "ACTAttention",
+    "ACTBackboneCapture",
+    "SmolVLAAttention",
+    "VisionAttentionCapture",
+]
