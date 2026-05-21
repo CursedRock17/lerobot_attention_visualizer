@@ -26,7 +26,7 @@ specific eval loop using it.
 
 ## Compatibility
 
-Targets **lerobot v0.5.x** and **LeRobotDataset v3.0**. Hardware-agnostic:
+Targets **lerobot v0.5.1+** and **LeRobotDataset v3.0**. Hardware-agnostic:
 works with any robot lerobot supports (SO-100, SO-101, Aloha, …). CUDA is
 preferred for SmolVLA / π0; ACT runs comfortably on CPU.
 
@@ -78,7 +78,7 @@ addition. It will share the same `policies/` adapters as live eval.
 
 ## Install
 
-lerobot v0.5.0 requires **Python ≥ 3.12**. Use a fresh conda env so the
+lerobot v0.5.1+ requires **Python ≥ 3.12**. Use a fresh conda env so the
 heavy native deps (torch, cv2, pyrealsense, SDL/pygame) don't fight an
 existing install.
 
@@ -92,7 +92,7 @@ conda activate lav
 ### 2. Install with the extras you need
 
 This package re-exports lerobot's extras, so `pip install -e '.[smolvla]'`
-pulls `lerobot==0.5.0` plus `lerobot[smolvla]` in one go. Pick the extras
+pulls `lerobot>=0.5.1` plus `lerobot[smolvla]` in one go. Pick the extras
 matching the policies you intend to visualize, plus any robot/camera
 extras for real hardware:
 
@@ -125,7 +125,7 @@ development), install lerobot from git first — pip will leave it alone
 when resolving our deps:
 
 ```bash
-pip install 'lerobot[smolvla,feetech] @ git+https://github.com/huggingface/lerobot.git@v0.5.0'
+pip install 'lerobot[smolvla,feetech] @ git+https://github.com/huggingface/lerobot.git@v0.5.1'
 pip install -e .
 ```
 

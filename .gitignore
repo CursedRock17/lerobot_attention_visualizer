@@ -17,6 +17,9 @@ venv/
 # OS
 .DS_Store
 
+# lerobot source checkout (install via pip, not bundled in this repo)
+lerobot/
+
 # lerobot artifacts
 outputs/
 
