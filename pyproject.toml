@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lerobot-attention-visualizer"
-version = "0.1.1"
+version = "0.1.2"
 description = "Stream attention / activation heatmaps from lerobot policies to rerun, live or from a recorded dataset."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -37,16 +37,13 @@ Repository = "https://github.com/CursedRock17/lerobot_attention_visualizer"
 # extra (it's in core lerobot), so there's no `act` key here.
 smolvla = ["lerobot[smolvla]>=0.5.1,<0.6.0"]
 pi = ["lerobot[pi]>=0.5.1,<0.6.0"]
-wallx = ["lerobot[wallx]>=0.5.1,<0.6.0"]
-xvla = ["lerobot[xvla]>=0.5.1,<0.6.0"]
 # Robot / camera extras.
 feetech = ["lerobot[feetech]>=0.5.1,<0.6.0"]
 aloha = ["lerobot[aloha]>=0.5.1,<0.6.0"]
 intelrealsense = ["lerobot[intelrealsense]>=0.5.1,<0.6.0"]
-# Everything lerobot ships.
-all = ["lerobot[all]>=0.5.1,<0.6.0"]
-# Development tooling — pytest only for now; tests are self-contained and
-# don't require any of the policy extras.
+# Convenience bundle — installs all supported policy + hardware extras.
+all = ["lerobot-attention-visualizer[smolvla,pi,feetech,aloha,intelrealsense]"]
+# Development tooling.
 dev = ["pytest>=7.0"]
 
 [tool.hatch.build.targets.wheel]

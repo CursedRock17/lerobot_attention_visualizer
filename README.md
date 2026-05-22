@@ -109,14 +109,12 @@ hardware:
 | Use case               | Extra              |
 | ---------------------- | ------------------ |
 | SmolVLA                | `smolvla`          |
-| π0 / π0.5              | `pi`               |
-| Wall-X                 | `wallx`            |
-| X-VLA                  | `xvla`             |
+| π0 / π0.5 / π0-fast   | `pi`               |
 | ACT                    | *(none — in core)* |
 | SO-100 / SO-101 motors | `feetech`          |
 | Aloha                  | `aloha`            |
 | Intel RealSense camera | `intelrealsense`   |
-| Everything lerobot has | `all`              |
+| All of the above       | `all`              |
 
 ### PyPI
 
