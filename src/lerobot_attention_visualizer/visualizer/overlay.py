@@ -36,18 +36,27 @@ def rollout_to_patch_heatmap(rollout: torch.Tensor) -> torch.Tensor:
 
 
 def patch_heatmap_to_image(
-    heatmap: torch.Tensor, target_hw: tuple[int, int]
+    heatmap: torch.Tensor,
+    target_hw: tuple[int, int],
+    clip_percentile: float = 95.0,
 ) -> np.ndarray:
-    """Upsample a (h_p, w_p) patch heatmap to `target_hw` and normalize to [0, 1]."""
+    """Upsample a (h_p, w_p) patch heatmap to `target_hw` and normalize to [0, 1].
+
+    `clip_percentile` clips the top (100 - clip_percentile)% of values before
+    normalizing. SigLIP's learned positional embeddings create consistent hot
+    spots at edge patches; capping at the 95th percentile suppresses those
+    structural artifacts so semantic content (e.g. the object being grasped)
+    fills the color scale instead.
+    """
     # Add batch + channel dims for torch interpolate.
     h = heatmap.float()[None, None]  # (1, 1, H, W)
     # Bilinear upsample from patch grid to full image resolution.
     h = F.interpolate(h, size=target_hw, mode="bilinear", align_corners=False)[0, 0]
-    # Min-max normalize so the colormap uses the full range each frame.
-    h = h - h.min()
-    denom = h.max()
-    if denom > 0:
-        h = h / denom
+    # Percentile-clip then normalize so positional artifacts don't dominate.
+    lo = h.min()
+    hi = torch.quantile(h.reshape(-1), clip_percentile / 100.0)
+    h = (h - lo) / (hi - lo + 1e-8)
+    h = h.clamp(0.0, 1.0)
     return h.cpu().numpy()
 
 

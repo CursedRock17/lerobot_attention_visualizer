@@ -24,6 +24,20 @@ with viz:
 That's the whole library surface. Everything in `examples/` is one
 specific eval loop using it.
 
+## Demo
+
+**SmolVLA** — attention rollout across SigLIP ViT layers, replayed from a
+recorded dataset (no hardware required):
+
+<video src="docs/resources/replay_smolvla.mp4" controls width="720"></video>
+
+**ACT** — ResNet-18 final-conv activation magnitude per camera while the
+arm executes live on hardware:
+
+<video src="docs/resources/active_act.mp4" controls width="720"></video>
+
+![Attention overlay in the rerun viewer](docs/resources/visualizing_attention.png)
+
 ## Compatibility
 
 Targets **lerobot v0.5.1+** and **LeRobotDataset v3.0**. Hardware-agnostic:
@@ -66,35 +80,31 @@ read the story without burning compute.
 ```
 src/lerobot_attention_visualizer/
 ├── visualizer/         # shared heatmap math + rerun streams
-└── policies/           # per-policy adapters (smolvla, act)
+└── policies/           # per-policy adapters (smolvla, pi0, act)
 
-examples/               # runnable eval loops (edit constants then run)
+examples/
+├── smolvla_so101_rtc.py          # SmolVLA + RTC on a live SO-101
+├── act_so101.py                  # ACT on a live SO-101
+└── visualize_smolvla_dataset.py  # offline replay from a LeRobotDataset
+
 docs/                   # tutorials (custom policies, etc.)
+docs/resources/         # demo videos and screenshots
 ```
-
-A `playback/` adapter for replaying a recorded `LeRobotDataset` and
-visualizing attention frame-by-frame (no robot hardware) is the next
-addition. It will share the same `policies/` adapters as live eval.
 
 ## Install
 
-lerobot v0.5.1+ requires **Python ≥ 3.12**. Use a fresh conda env so the
-heavy native deps (torch, cv2, pyrealsense, SDL/pygame) don't fight an
-existing install.
-
-### 1. Create the env
+Requires **Python ≥ 3.12** and **lerobot v0.5.1+**. Use a fresh conda env
+so the heavy native deps (torch, cv2, pyrealsense, SDL/pygame) don't fight
+an existing install:
 
 ```bash
 conda create -n lav python=3.12 -y
 conda activate lav
 ```
 
-### 2. Install with the extras you need
-
-This package re-exports lerobot's extras, so `pip install -e '.[smolvla]'`
-pulls `lerobot>=0.5.1` plus `lerobot[smolvla]` in one go. Pick the extras
-matching the policies you intend to visualize, plus any robot/camera
-extras for real hardware:
+Both routes below install the same extras. Pick the ones matching the
+policies you intend to visualize, plus any robot/camera extras for real
+hardware:
 
 | Use case               | Extra              |
 | ---------------------- | ------------------ |
@@ -108,42 +118,56 @@ extras for real hardware:
 | Intel RealSense camera | `intelrealsense`   |
 | Everything lerobot has | `all`              |
 
-Combine with commas. SmolVLA on an SO-101 with a RealSense:
+### PyPI
+
+The quickest route — no git clone required:
 
 ```bash
-pip install -e '.[smolvla,feetech,intelrealsense]'
+pip install lerobot-attention-visualizer          # ACT only
+pip install 'lerobot-attention-visualizer[smolvla]'           # + SmolVLA
+pip install 'lerobot-attention-visualizer[smolvla,feetech,intelrealsense]'  # full SO-101 rig
 ```
 
-ACT-only on an SO-101:
+### From source
+
+Clone the repo and install in editable mode so local edits take effect
+immediately:
 
 ```bash
-pip install -e '.[feetech]'
+git clone https://github.com/CursedRock17/lerobot_attention_visualizer
+cd lerobot_attention_visualizer
+pip install -e '.[smolvla]'                      # replace with your extras
 ```
 
-If you'd rather track the v0.5.0 **git tag** (e.g. during active lerobot
-development), install lerobot from git first — pip will leave it alone
-when resolving our deps:
+If you need to track a specific lerobot git tag (e.g. during active lerobot
+development), install lerobot first — pip will leave it alone when
+resolving our deps:
 
 ```bash
 pip install 'lerobot[smolvla,feetech] @ git+https://github.com/huggingface/lerobot.git@v0.5.1'
-pip install -e .
+pip install -e '.[smolvla,feetech]'
 ```
 
 ## Run the examples
 
-The example scripts under `examples/` connect to a real robot (e.g.
-SO-101) and stream overlays to rerun. Edit the constants at the top of
-each script (`HF_USER`, follower port, camera serials, task description)
-to match your setup, then:
+**No hardware? Start here** — replay a recorded dataset and visualize
+attention frame-by-frame:
+
+```bash
+python examples/visualize_smolvla_dataset.py   # edit POLICY_PATH + DATASET_REPO_ID at top
+```
+
+**Live on a robot** — edit the constants at the top of each script
+(follower port, camera serials, task description) then:
 
 ```bash
 python examples/smolvla_so101_rtc.py   # SmolVLA + RTC + rollout
 python examples/act_so101.py           # ACT + ResNet activation
 ```
 
-Toggle `ATTENTION_ENABLED = False` at the top of either script to run the
-same control loop without the capture — useful for A/B-comparing the
-policy's behavior with the instrumentation removed.
+Toggle `ATTENTION_ENABLED = False` at the top of either live script to
+run the same control loop without the capture — useful for A/B-comparing
+the policy's behavior with the instrumentation removed.
 
 ## Integrate into your own project
 

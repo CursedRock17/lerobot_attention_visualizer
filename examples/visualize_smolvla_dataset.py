@@ -52,6 +52,10 @@ TASK_DESCRIPTION = "pink lego brick into the transparent box"
 EPISODE_IDX = 45         # which episode to replay
 LAST_LAYER_ONLY = True  # True = crisper maps; False = full attention rollout
 PLAYBACK_FPS = 30       # pacing; set to None to run as fast as possible
+# Clip the top (100 - CLIP_PERCENTILE)% before normalizing the heatmap.
+# Suppresses SigLIP's structural edge hot spots so the object being manipulated
+# fills the color scale. Lower = more clipping; 100 = plain min-max.
+CLIP_PERCENTILE = 95.0
 # ---------------------------------------------------------------------------
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,7 +143,7 @@ with viz:
             policy.predict_action_chunk(batch)
 
         # drain_rollouts() + rr.log() happen here, outside the timed window.
-        viz.log_overlay(obs)
+        viz.log_overlay(obs, clip_percentile=CLIP_PERCENTILE)
 
         step = frame_idx + 1
         if step % 10 == 0:
