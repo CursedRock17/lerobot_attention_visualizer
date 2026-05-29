@@ -98,12 +98,12 @@ docs/resources/         # demo videos and screenshots
 
 ## Install
 
-Requires **Python ≥ 3.12** and **lerobot v0.5.1+**. Use a fresh conda env
+Requires **Python ≥ 3.10** and **lerobot v0.4.3+**. Use a fresh conda env
 so the heavy native deps (torch, cv2, pyrealsense, SDL/pygame) don't fight
 an existing install:
 
 ```bash
-conda create -n lav python=3.12 -y
+conda create -n lav python=3.11 -y   # 3.10, 3.11, or 3.12 all work
 conda activate lav
 ```
 
