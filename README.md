@@ -48,7 +48,11 @@ preferred for SmolVLA / π0; ACT runs comfortably on CPU.
 
 - **SmolVLA** — attention rollout across the SigLIP ViT layers.
   [`policies/smolvla.py`](src/lerobot_attention_visualizer/policies/smolvla.py).
-- **π0 / π0.5 / π0-fast** — same rollout, ported to PaliGemma's vision
+- **Groot N1.6** — same SigLIP rollout via Eagle-2's vision encoder. All
+  cameras are batched into one forward pass; the adapter splits Q/K by
+  camera index. Requires `flash-attn` — see [Groot install](#groot-n16)
+  below. [`policies/groot.py`](src/lerobot_attention_visualizer/policies/groot.py).
+- **π0 / π0.5 / π0-fast** — attention rollout across PaliGemma's vision
   tower. One adapter (`Pi0Attention`) handles all three since they share
   the `paligemma_with_expert.embed_image` layout.
   [`policies/pi0.py`](src/lerobot_attention_visualizer/policies/pi0.py).
@@ -85,7 +89,8 @@ src/lerobot_attention_visualizer/
 examples/
 ├── smolvla_so101_rtc.py          # SmolVLA + RTC on a live SO-101
 ├── act_so101.py                  # ACT on a live SO-101
-└── visualize_smolvla_dataset.py  # offline replay from a LeRobotDataset
+├── visualize_smolvla_dataset.py  # SmolVLA offline replay from a LeRobotDataset
+└── visualize_groot_dataset.py    # Groot N1.6 offline replay from a LeRobotDataset
 
 docs/                   # tutorials (custom policies, etc.)
 docs/resources/         # demo videos and screenshots
@@ -146,13 +151,32 @@ pip install 'lerobot[smolvla,feetech] @ git+https://github.com/huggingface/lerob
 pip install -e '.[smolvla,feetech]'
 ```
 
+### Groot N1.6
+
+Groot requires `flash-attn`, a CUDA C++ extension that must be compiled from
+source and is not available as a wheel on PyPI. Install it separately before
+installing this package:
+
+```bash
+# Requires: CUDA toolkit, C++ compiler, and ~20 min build time.
+pip install flash-attn --no-build-isolation
+
+# Then install lerobot's groot extra and this package:
+pip install 'lerobot[groot]>=0.5.1,<0.6.0'
+pip install lerobot-attention-visualizer       # or -e . from source
+```
+
+For detailed environment setup (CUDA version pinning, pre-built wheels if
+available), follow [NVIDIA's Isaac-GR00T install guide](https://github.com/NVIDIA/Isaac-GR00T).
+
 ## Run the examples
 
 **No hardware? Start here** — replay a recorded dataset and visualize
 attention frame-by-frame:
 
 ```bash
-python examples/visualize_smolvla_dataset.py   # edit POLICY_PATH + DATASET_REPO_ID at top
+python examples/visualize_smolvla_dataset.py   # SmolVLA — edit POLICY_PATH + DATASET_REPO_ID at top
+python examples/visualize_groot_dataset.py     # Groot N1.6 — same, requires flash-attn
 ```
 
 **Live on a robot** — edit the constants at the top of each script
