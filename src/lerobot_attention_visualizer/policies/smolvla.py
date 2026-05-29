@@ -217,6 +217,30 @@ class VisionAttentionCapture:
             c.q = None
             c.k = None
 
+    def snapshot_split(self, n_cameras: int) -> None:
+        """Freeze one snapshot per camera from a single batched vision-model forward.
+
+        Used by policies (e.g. Groot) that stack all camera images into one
+        pixel_values tensor of shape (N_cameras, C, H, W) and run a single
+        vision-encoder forward rather than calling embed_image per camera.
+        After the forward, each layer's Q/K has shape (N_cameras, seq, dim).
+        This slices on dim 0 to produce N_cameras independent _LayerCache entries
+        in _pending — one per camera, in the same order as pixel_values.
+        """
+        for cam_idx in range(n_cameras):
+            self._pending.append([
+                _LayerCache(
+                    q=c.q[cam_idx : cam_idx + 1] if c.q is not None else None,
+                    k=c.k[cam_idx : cam_idx + 1] if c.k is not None else None,
+                    num_heads=c.num_heads,
+                    head_dim=c.head_dim,
+                )
+                for c in self._layers
+            ])
+        for c in self._layers:
+            c.q = None
+            c.k = None
+
     def drain_rollouts(
         self,
         last_layer_only: bool = False,
