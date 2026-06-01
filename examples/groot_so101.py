@@ -32,7 +32,9 @@ import torch
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
 from lerobot.cameras.configs import ColorMode
+from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.datasets.utils import hw_to_dataset_features
+from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.groot.modeling_groot import GrootPolicy
 from lerobot.policies.groot.processor_groot import make_groot_pre_post_processors
 from lerobot.policies.utils import build_inference_frame, make_robot_action
@@ -46,7 +48,9 @@ from lerobot_attention_visualizer import GR00TAttention
 # ---------------------------------------------------------------------------
 # Edit these to match your setup
 # ---------------------------------------------------------------------------
-POLICY_PATH      = "nvidia/GR00T-N1.5-3B"    # Hub repo or local path to N1.5 checkpoint
+# Base model weights. This is NVIDIA's pretrained checkpoint, not a lerobot
+# GrootPolicy checkpoint — the policy is constructed fresh from GrootConfig.
+BASE_MODEL_PATH  = "nvidia/GR00T-N1.5-3B"
 device           = torch.device("cuda")
 
 # Task
@@ -70,7 +74,8 @@ FRAME_W, FRAME_H = 640, 480
 # on the second+ call (first call is a ~30s warmup). Safe to enable alongside
 # attention capture; we hook q_proj/k_proj before compile sees the graph.
 # Set False if you hit shape-related compile errors.
-TORCH_COMPILE = False
+TORCH_COMPILE  = False
+EMBODIMENT_TAG = "new_embodiment"   # matches GR00T's SO-100/101 embodiment
 # ---------------------------------------------------------------------------
 
 follower_config = SO101FollowerConfig(
@@ -97,7 +102,34 @@ follower_config = SO101FollowerConfig(
 )
 follower = SO101Follower(follower_config)
 
-policy = GrootPolicy.from_pretrained(POLICY_PATH)
+# Build GrootConfig from the robot's feature schema and load base weights.
+# nvidia/GR00T-N1.5-3B is NVIDIA's pretrained checkpoint — not a lerobot
+# GrootPolicy checkpoint. Calling from_pretrained on it would fail because
+# draccus can't parse NVIDIA's native config as GrootConfig.
+action_features  = hw_to_dataset_features(follower.action_features, "action")
+obs_features     = hw_to_dataset_features(follower.observation_features, "observation")
+dataset_features = {**action_features, **obs_features}
+
+_action_dim = next(v["shape"][0] for k, v in action_features.items())
+_state_dim  = next(
+    v["shape"][0] for k, v in obs_features.items()
+    if "state" in k and "image" not in k
+)
+_cam_keys   = [k.removeprefix("observation.images.") for k in obs_features if "observation.images." in k]
+
+_groot_config = GrootConfig(
+    input_features={
+        **{"observation.images." + cam: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 256, 256))
+           for cam in _cam_keys},
+        "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(_state_dim,)),
+    },
+    output_features={
+        "action": PolicyFeature(type=FeatureType.ACTION, shape=(_action_dim,)),
+    },
+    base_model_path=BASE_MODEL_PATH,
+    embodiment_tag=EMBODIMENT_TAG,
+)
+policy = GrootPolicy(_groot_config)
 policy.to(device).eval()
 
 if TORCH_COMPILE:
@@ -107,10 +139,6 @@ if TORCH_COMPILE:
     policy._groot_model.action_head = torch.compile(
         policy._groot_model.action_head, mode="reduce-overhead"
     )
-
-action_features = hw_to_dataset_features(follower.action_features, "action")
-obs_features    = hw_to_dataset_features(follower.observation_features, "observation")
-dataset_features = {**action_features, **obs_features}
 
 preprocessor, postprocessor = make_groot_pre_post_processors(
     config=policy.config,

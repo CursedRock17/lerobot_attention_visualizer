@@ -61,7 +61,9 @@ CLIP_PERCENTILE = 95.0
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load one episode so the download is small.
-dataset = LeRobotDataset(DATASET_REPO_ID, episodes=[EPISODE_IDX])
+# revision="main" bypasses the Hub version-tag check — some community datasets
+# are not tagged with a codebase version even though their info.json is valid v3.0.
+dataset = LeRobotDataset(DATASET_REPO_ID, episodes=[EPISODE_IDX], revision="main")
 
 # Derive the episode length.
 # dataset.meta.episodes is a HF datasets.Dataset; column-indexed with bare Python ints.

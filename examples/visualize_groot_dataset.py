@@ -43,6 +43,7 @@ import torch
 
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.groot.modeling_groot import GrootPolicy
 from lerobot.policies.groot.processor_groot import make_groot_pre_post_processors
 from lerobot.utils.visualization_utils import init_rerun
@@ -58,10 +59,14 @@ if _local_bin not in os.environ.get("PATH", ""):
 # ---------------------------------------------------------------------------
 # Edit these to match your setup
 # ---------------------------------------------------------------------------
-POLICY_PATH      = "nvidia/GR00T-N1.5-3B"  # Hub repo or local path
-DATASET_REPO_ID  = "aravindhs-NV/so100-orig-groot-vials-rack-left-cosmos-70"                       # e.g. "your-username/your-groot-dataset"
-TASK_DESCRIPTION = "pick up the vial and place in the yellow rack"                       # must match the task used during training
+# Base model weights to load. This is NVIDIA's pretrained checkpoint — NOT a
+# lerobot GrootPolicy checkpoint. GrootPolicy is constructed fresh from a
+# GrootConfig built from the dataset's features; it then downloads these weights.
+BASE_MODEL_PATH  = "nvidia/GR00T-N1.5-3B"
+DATASET_REPO_ID  = ""       # e.g. "sreetz-nv/so101_teleop_vials_rack_left_sim_and_left"
+TASK_DESCRIPTION = ""       # must match the task description used during recording
 
+EMBODIMENT_TAG   = "new_embodiment"  # matches GR00T's SO-100/101 embodiment
 EPISODE_IDX      = 0       # which episode to replay
 LAST_LAYER_ONLY  = True    # True = crisper maps; False = full attention rollout
 PLAYBACK_FPS     = 10      # pacing; set to None to run as fast as possible
@@ -70,14 +75,18 @@ CLIP_PERCENTILE  = 95.0    # suppress SigLIP edge artifacts (lower = more clippi
 
 if not DATASET_REPO_ID:
     raise ValueError(
-        "Set DATASET_REPO_ID to a LeRobotDataset hub repo trained with Groot. "
+        "Set DATASET_REPO_ID to a LeRobotDataset hub repo. "
         "See the module docstring for guidance on finding a compatible dataset."
     )
+if not TASK_DESCRIPTION:
+    raise ValueError("Set TASK_DESCRIPTION to the task string used when recording the dataset.")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load one episode so the download is small.
-dataset = LeRobotDataset(DATASET_REPO_ID, episodes=[EPISODE_IDX])
+# revision="main" bypasses the Hub version-tag check — some community datasets
+# are not tagged with a codebase version even though their info.json is valid v3.0.
+dataset = LeRobotDataset(DATASET_REPO_ID, episodes=[EPISODE_IDX], revision="main")
 
 episode_len = len(dataset)
 print(f"Episode {EPISODE_IDX}: {episode_len} frames at {dataset.fps} Hz")
@@ -91,22 +100,30 @@ camera_keys = [
 ]
 print(f"Cameras: {camera_keys}")
 
-policy = GrootPolicy.from_pretrained(POLICY_PATH)
-policy.to(device).eval()
+# Build GrootConfig from the dataset's actual features.
+# nvidia/GR00T-N1.5-3B is the base weights, not a lerobot GrootPolicy checkpoint —
+# GrootPolicy.from_pretrained() would fail trying to parse NVIDIA's native config
+# through draccus. Instead we construct GrootConfig explicitly and GrootPolicy()
+# calls GR00TN15.from_pretrained(BASE_MODEL_PATH) internally.
+_state_feat = dataset.features.get("observation.state")
+_state_dim = _state_feat["shape"][0] if _state_feat else 6
+_action_feat = dataset.features.get("action")
+_action_dim = _action_feat["shape"][0] if _action_feat else 6
 
-# Remap image_features to match the actual dataset camera names.
-# Groot checkpoints ship with placeholder keys; prepare_images does a dict
-# lookup so keys must match the actual batch. We patch input_features
-# (the source that image_features derives from) instead of the read-only property.
-_vis_feature = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 256, 256))
-_non_visual = {
-    k: v for k, v in policy.config.input_features.items()
-    if v.type is not FeatureType.VISUAL
-}
-policy.config.input_features = {
-    **_non_visual,
-    **{f"{cam_prefix}{cam}": _vis_feature for cam in camera_keys},
-}
+_groot_config = GrootConfig(
+    input_features={
+        **{f"{cam_prefix}{cam}": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 256, 256))
+           for cam in camera_keys},
+        "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(_state_dim,)),
+    },
+    output_features={
+        "action": PolicyFeature(type=FeatureType.ACTION, shape=(_action_dim,)),
+    },
+    base_model_path=BASE_MODEL_PATH,
+    embodiment_tag=EMBODIMENT_TAG,
+)
+policy = GrootPolicy(_groot_config)
+policy.to(device).eval()
 
 preprocessor, _ = make_groot_pre_post_processors(
     config=policy.config,
