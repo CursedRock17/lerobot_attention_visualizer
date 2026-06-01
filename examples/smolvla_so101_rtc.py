@@ -56,6 +56,12 @@ MAX_GUIDANCE_WEIGHT = 10.0
 # Attention visualization — flip off to run a plain RTC loop.
 ATTENTION_ENABLED = True
 
+# torch.compile — compiles SmolVLA's action expert for ~20-40% faster inference
+# after a one-time warmup (~30s). The vision encoder is left uncompiled because
+# our q_proj/k_proj hooks run on it; compiling hooked modules is safe but may
+# negate the speedup on that subgraph. Set False if you hit triton errors.
+TORCH_COMPILE = False
+
 # Rates: cameras stream at CAMERA_FPS, the arm is driven at CONTROL_FPS.
 # Capture adds a matmul+softmax per ViT layer per chunk on top of the VLM
 # forward, so lower control rate keeps the laptop GPU comfortable.
@@ -87,6 +93,14 @@ follower_config = SO101FollowerConfig(
 follower = SO101Follower(follower_config)
 
 policy = SmolVLAPolicy.from_pretrained(POLICY_PATH)
+
+if TORCH_COMPILE:
+    # Compile the action expert (transformer + flow-matching head); leave the
+    # SigLIP vision encoder uncompiled so our q_proj/k_proj hooks are unaffected.
+    policy.model.vlm_with_expert.expert_model = torch.compile(
+        policy.model.vlm_with_expert.expert_model, mode="reduce-overhead"
+    )
+
 policy.config.rtc_config = RTCConfig(
     enabled=RTC_ENABLED,
     execution_horizon=EXECUTION_HORIZON,

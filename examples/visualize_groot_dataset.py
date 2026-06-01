@@ -59,8 +59,8 @@ if _local_bin not in os.environ.get("PATH", ""):
 # Edit these to match your setup
 # ---------------------------------------------------------------------------
 POLICY_PATH      = "nvidia/GR00T-N1.5-3B"  # Hub repo or local path
-DATASET_REPO_ID  = ""                       # e.g. "your-username/your-groot-dataset"
-TASK_DESCRIPTION = ""                       # must match the task used during training
+DATASET_REPO_ID  = "aravindhs-NV/so100-orig-groot-vials-rack-left-cosmos-70"                       # e.g. "your-username/your-groot-dataset"
+TASK_DESCRIPTION = "pick up the vial and place in the yellow rack"                       # must match the task used during training
 
 EPISODE_IDX      = 0       # which episode to replay
 LAST_LAYER_ONLY  = True    # True = crisper maps; False = full attention rollout
