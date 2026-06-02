@@ -129,13 +129,15 @@ class Pi0Attention:
         prefix: str = "attention",
         clip_percentile: float = 95.0,
         suppress_outliers: bool = False,
+        gamma: float = 1.0,
     ) -> None:
         """Compute rollouts from pending snapshots, then stream image / heatmap / overlay per camera.
 
         Rollout compute happens here — after merge() — so it doesn't inflate
         real_latency. No-op if no forward happened since the last call.
 
-        `suppress_outliers` winsorizes SigLIP attention-sink spikes — see
+        `suppress_outliers` winsorizes SigLIP attention-sink spikes and `gamma`
+        sets the display contrast (>1 = punchier, background suppressed) — see
         `patch_heatmap_to_image`.
         """
         rollouts = self._capture.drain_rollouts(last_layer_only=self._last_layer_only)
@@ -156,6 +158,7 @@ class Pi0Attention:
                 target_hw=image.shape[:2],
                 clip_percentile=clip_percentile,
                 suppress_outliers=suppress_outliers,
+                gamma=gamma,
             )
             log_attention_overlay(f"{prefix}/{cam_key}", image, heat)
 

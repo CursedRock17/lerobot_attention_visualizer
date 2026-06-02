@@ -42,6 +42,7 @@ def patch_heatmap_to_image(
     target_hw: tuple[int, int],
     clip_percentile: float = 95.0,
     suppress_outliers: bool = False,
+    gamma: float = 1.0,
 ) -> np.ndarray:
     """Upsample a (h_p, w_p) patch heatmap to `target_hw` and normalize to [0, 1].
 
@@ -58,6 +59,13 @@ def patch_heatmap_to_image(
     blend in instead of dominating. `clip_percentile` only caps the *upsampled*
     distribution (a percentile keeps the spikes at full brightness); this removes
     them at the source. Left off by default so the map stays faithful unless asked.
+
+    `gamma` applies a power curve to the final [0, 1] map (`h ** gamma`). The
+    default 1.0 is linear (unchanged). `gamma > 1` makes the map more "extreme" —
+    it crushes low/mid background toward 0 while leaving the bright peak near 1,
+    so the hot region stands out and ambient noise fades (try 2–4). `gamma < 1`
+    flattens / brightens the low end. It's a display contrast dial only; the
+    underlying attention isn't changed.
     """
     h = heatmap.float()
     if suppress_outliers:
@@ -75,6 +83,9 @@ def patch_heatmap_to_image(
     hi = torch.quantile(h.reshape(-1), clip_percentile / 100.0)
     h = (h - lo) / (hi - lo + 1e-8)
     h = h.clamp(0.0, 1.0)
+    # Contrast curve: push background down, keep the peak, for a punchier overlay.
+    if gamma != 1.0:
+        h = h.pow(gamma)
     return h.cpu().numpy()
 
 

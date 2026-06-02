@@ -63,6 +63,9 @@ CLIP_PERCENTILE = 95.0
 # (median + 6·MAD) so they don't read as splotches. Flip to True and re-run to
 # A/B against the default in the rerun viewer.
 SUPPRESS_OUTLIERS = False
+# Display contrast. 1.0 = linear. >1 makes the map more "extreme" — crushes
+# background noise toward black and isolates the bright hot spot (try 2–4).
+GAMMA = 1.0
 # ---------------------------------------------------------------------------
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -152,7 +155,12 @@ with viz:
             policy.predict_action_chunk(batch)
 
         # drain_rollouts() + rr.log() happen here, outside the timed window.
-        viz.log_overlay(obs, clip_percentile=CLIP_PERCENTILE, suppress_outliers=SUPPRESS_OUTLIERS)
+        viz.log_overlay(
+            obs,
+            clip_percentile=CLIP_PERCENTILE,
+            suppress_outliers=SUPPRESS_OUTLIERS,
+            gamma=GAMMA,
+        )
 
         step = frame_idx + 1
         if step % 10 == 0:

@@ -11,12 +11,24 @@ GR00TN1d6Attention
     Wraps Isaac-GR00T's native `Gr00tPolicy` (Groot N1.6 / Gr00tN1d6).
     The native loader registers `Gr00tN1d6` with HuggingFace AutoModel;
     lerobot's `GrootPolicy.from_pretrained` cannot load N1.6 checkpoints.
-    Attribute path:
+    Assumed attribute path (INHERITED FROM N1.5 — SEE WARNING BELOW):
         policy.model.backbone.eagle_model.vision_model
         policy.model.action_head.model
 
-Both share the same Eagle-2 / SigLIP vision encoder and the same flow-matching
-action head, so they share one base class `_EagleCrossAttention`.
+    !!! N1.6 ARCHITECTURE IS NOT THE SAME AS N1.5 — PATHS UNVERIFIED !!!
+    N1.5 uses the Eagle-2 VLM (SmolLM2 LLM + SigLIP). N1.6 swapped to a
+    **SigLIP2 vision encoder + Qwen3 language model** with a reworked VL→DiT
+    connector; its action head is the "AlternateVLDiT" (still a cross-attention
+    flow-matching DiT that interleaves cross-attn every 2 blocks, so the
+    `CrossAttentionCapture` *approach* still applies). BUT the module paths
+    above and the image-token mask (`eagle_input_ids == image_token_index`,
+    Eagle/InternVL-style) are copied from N1.5 and have NOT been verified
+    against a real N1.6 checkpoint. Run a `policy.model` module-tree probe and
+    fix the paths before trusting N1.6 maps. Tracked on branch `groot_n16`.
+
+The N1.5 `GR00TAttention` below is verified; only N1.6 is provisional. They
+currently share the `_EagleCrossAttention` base on the (unconfirmed) assumption
+that the vision-encoder + cross-attn-DiT layout carries over.
 
 # Two complementary signals
 
@@ -154,6 +166,7 @@ class _EagleCrossAttention:
         prefix: str = "attention",
         clip_percentile: float = 95.0,
         suppress_outliers: bool = False,
+        gamma: float = 1.0,
     ) -> None:
         """Stream the encoder overlay and the action cross-attention overlay.
 
@@ -161,9 +174,10 @@ class _EagleCrossAttention:
         independently if its token count doesn't match the camera count, rather
         than misaligning overlays.
 
-        `suppress_outliers` winsorizes SigLIP attention-sink spikes — see
-        `patch_heatmap_to_image`. It mainly helps the encoder view; the action
-        view rarely needs it, but the flag is applied to both for consistency.
+        `suppress_outliers` winsorizes SigLIP attention-sink spikes (mainly helps
+        the encoder view) and `gamma` sets the display contrast (>1 = punchier,
+        background suppressed) — see `patch_heatmap_to_image`. Both apply to the
+        encoder and action overlays alike.
         """
         camera_keys = self.camera_keys()
         n = len(camera_keys)
@@ -181,6 +195,7 @@ class _EagleCrossAttention:
                     target_hw=image.shape[:2],
                     clip_percentile=clip_percentile,
                     suppress_outliers=suppress_outliers,
+                    gamma=gamma,
                 )
                 log_attention_overlay(f"{prefix}/{cam_key}/encoder", image, heat)
 
@@ -198,6 +213,7 @@ class _EagleCrossAttention:
                         target_hw=image.shape[:2],
                         clip_percentile=clip_percentile,
                         suppress_outliers=suppress_outliers,
+                        gamma=gamma,
                     )
                     log_attention_overlay(f"{prefix}/{cam_key}/action", image, heat)
 
@@ -259,7 +275,14 @@ class GR00TN1d6Attention(_EagleCrossAttention):
     "external" — without the "observation.images." prefix).
 
     The Isaac-GR00T `Gr00tPolicy` stores the loaded model at `policy.model`
-    (not `policy._groot_model`). Everything else is identical to N1.5.
+    (not `policy._groot_model`).
+
+    PROVISIONAL: the `policy.model.backbone.eagle_model.vision_model` and
+    `action_head.model.transformer_blocks` paths below are inherited from N1.5
+    and are NOT confirmed for N1.6 (SigLIP2 + Qwen3, not Eagle-2). They will
+    raise `AttributeError` if N1.6 renamed/restructured the backbone. Verify
+    against a real N1.6 module tree and adjust before relying on the maps — see
+    the module docstring and branch `groot_n16`.
     """
 
     def __init__(

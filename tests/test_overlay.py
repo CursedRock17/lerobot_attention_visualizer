@@ -89,6 +89,22 @@ class TestPatchHeatmapToImage:
         # has no dominating hot spot (range collapses toward 0).
         assert out.max() < 0.5
 
+    def test_gamma_default_is_linear(self):
+        heat = torch.linspace(0.0, 1.0, 16).reshape(4, 4)
+        out_lin = patch_heatmap_to_image(heat, target_hw=(4, 4), clip_percentile=100.0)
+        out_g1 = patch_heatmap_to_image(heat, target_hw=(4, 4), clip_percentile=100.0, gamma=1.0)
+        np.testing.assert_allclose(out_lin, out_g1, atol=1e-6)
+
+    def test_gamma_gt1_suppresses_midtones(self):
+        # A mid-level value (0.5 after normalization) should drop under gamma>1,
+        # while the peak (1.0) stays at 1.0 and the floor (0.0) stays at 0.0.
+        heat = torch.tensor([[0.0, 0.5], [0.5, 1.0]])
+        out = patch_heatmap_to_image(heat, target_hw=(2, 2), clip_percentile=100.0, gamma=3.0)
+        assert out.max() == pytest.approx(1.0, abs=1e-6)   # peak preserved
+        assert out.min() == pytest.approx(0.0, abs=1e-6)   # floor preserved
+        # 0.5 ** 3 = 0.125 — midtone strongly suppressed vs the linear 0.5.
+        assert out[0, 1] == pytest.approx(0.125, abs=1e-4)
+
     def test_suppress_outliers_preserves_real_structure(self):
         # A graded ramp (no outliers) should survive suppression largely intact —
         # median+6·MAD sits above the real range, so nothing is clipped.

@@ -1,7 +1,16 @@
-# Groot N1.6 Adapter — Design Notes
+# Groot Adapter — Design Notes
 
 Design document for `policies/groot.py` — the attention visualizer adapter for NVIDIA's
-Groot N1.6 policy, which uses the Eagle-2 VLM backbone.
+Groot policies.
+
+> **Status / scope.** Everything below is **verified for Groot N1.5** (Eagle-2 VLM
+> = SmolLM2 + SigLIP, vendored in lerobot v0.5.0). **N1.6 is different** — it uses a
+> **SigLIP2 vision encoder + Qwen3 language model** with a reworked VL→DiT connector
+> ("AlternateVLDiT", cross-attn interleaved every 2 blocks). The cross-attention
+> *approach* carries over, but the module paths and the `image_token_index` masking
+> described here are **not confirmed for N1.6** — they need a runtime `policy.model`
+> module-tree probe. N1.6 work is isolated on branch `groot_n16`; N1.7 (Cosmos /
+> Qwen3-VL) is out of scope.
 
 ---
 
