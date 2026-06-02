@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from lerobot_attention_visualizer import patch_heatmap_to_image, rollout_to_patch_heatmap
+from lerobot_attention_visualizer.visualizer.overlay import _apply_colormap
 
 
 class TestRolloutToPatchHeatmap:
@@ -98,3 +99,49 @@ class TestPatchHeatmapToImage:
             heat, target_hw=(4, 4), clip_percentile=100.0, suppress_outliers=True
         )
         np.testing.assert_allclose(out_plain, out_supp, atol=1e-6)
+
+    def test_gamma_default_is_linear(self):
+        heat = torch.linspace(0.0, 1.0, 16).reshape(4, 4)
+        out_lin = patch_heatmap_to_image(heat, target_hw=(4, 4), clip_percentile=100.0)
+        out_g1 = patch_heatmap_to_image(heat, target_hw=(4, 4), clip_percentile=100.0, gamma=1.0)
+        np.testing.assert_allclose(out_lin, out_g1, atol=1e-6)
+
+    def test_gamma_gt1_suppresses_midtones(self):
+        # A mid-level value (0.5 after normalization) should drop under gamma>1,
+        # while the peak (1.0) stays at 1.0 and the floor (0.0) stays at 0.0.
+        heat = torch.tensor([[0.0, 0.5], [0.5, 1.0]])
+        out = patch_heatmap_to_image(heat, target_hw=(2, 2), clip_percentile=100.0, gamma=3.0)
+        assert out.max() == pytest.approx(1.0, abs=1e-6)   # peak preserved
+        assert out.min() == pytest.approx(0.0, abs=1e-6)   # floor preserved
+        # 0.5 ** 3 = 0.125 — midtone strongly suppressed vs the linear 0.5.
+        assert out[0, 1] == pytest.approx(0.125, abs=1e-4)
+
+
+class TestColormap:
+    def test_hot_reproduces_legacy_ramp(self):
+        # The "hot" LUT must match the old hardcoded clip(3h-k) ramp exactly,
+        # so existing overlays are unchanged.
+        h = np.linspace(0.0, 1.0, 50).reshape(5, 10)
+        out = _apply_colormap(h, "hot")
+        r = np.clip(h * 3.0, 0, 1)
+        g = np.clip(h * 3.0 - 1.0, 0, 1)
+        b = np.clip(h * 3.0 - 2.0, 0, 1)
+        legacy = (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
+        np.testing.assert_array_equal(out, legacy)
+
+    def test_output_shape_and_dtype(self):
+        h = np.linspace(0.0, 1.0, 12).reshape(3, 4)
+        out = _apply_colormap(h, "viridis")
+        assert out.shape == (3, 4, 3)
+        assert out.dtype == np.uint8
+
+    def test_blue_green_is_green_dominant_at_peak(self):
+        # At the high end the "blue-green" map should be green-dominant (g > r),
+        # the opposite of "hot" (which is red/white-dominant).
+        peak = np.ones((1, 1), dtype=np.float32)
+        out = _apply_colormap(peak, "blue-green")[0, 0]
+        assert out[1] > out[0]  # green channel beats red
+
+    def test_unknown_colormap_raises(self):
+        with pytest.raises(ValueError, match="Unknown colormap"):
+            _apply_colormap(np.zeros((2, 2)), "rainbow")

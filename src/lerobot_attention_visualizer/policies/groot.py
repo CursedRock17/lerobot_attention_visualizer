@@ -154,6 +154,8 @@ class _EagleCrossAttention:
         prefix: str = "attention",
         clip_percentile: float = 95.0,
         suppress_outliers: bool = False,
+        gamma: float = 1.0,
+        colormap: str = "hot",
     ) -> None:
         """Stream the encoder overlay and the action cross-attention overlay.
 
@@ -161,9 +163,10 @@ class _EagleCrossAttention:
         independently if its token count doesn't match the camera count, rather
         than misaligning overlays.
 
-        `suppress_outliers` winsorizes SigLIP attention-sink spikes — see
-        `patch_heatmap_to_image`. It mainly helps the encoder view; the action
-        view rarely needs it, but the flag is applied to both for consistency.
+        `suppress_outliers` winsorizes SigLIP attention-sink spikes (mainly helps
+        the encoder view) and `gamma` sets the display contrast (>1 = punchier,
+        background suppressed) — see `patch_heatmap_to_image`. `colormap` picks the
+        palette ("hot", "blue-green", "viridis"). All apply to both overlays.
         """
         camera_keys = self.camera_keys()
         n = len(camera_keys)
@@ -181,8 +184,9 @@ class _EagleCrossAttention:
                     target_hw=image.shape[:2],
                     clip_percentile=clip_percentile,
                     suppress_outliers=suppress_outliers,
+                    gamma=gamma,
                 )
-                log_attention_overlay(f"{prefix}/{cam_key}/encoder", image, heat)
+                log_attention_overlay(f"{prefix}/{cam_key}/encoder", image, heat, colormap=colormap)
 
         # --- Action-head cross-attention (the action-driving signal) ---
         importance = self._cross.drain() if self._cross is not None else None
@@ -198,8 +202,9 @@ class _EagleCrossAttention:
                         target_hw=image.shape[:2],
                         clip_percentile=clip_percentile,
                         suppress_outliers=suppress_outliers,
+                        gamma=gamma,
                     )
-                    log_attention_overlay(f"{prefix}/{cam_key}/action", image, heat)
+                    log_attention_overlay(f"{prefix}/{cam_key}/action", image, heat, colormap=colormap)
 
 
 class GR00TAttention(_EagleCrossAttention):
