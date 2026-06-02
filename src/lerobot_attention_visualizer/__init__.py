@@ -1,6 +1,11 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from .policies.act import ACTAttention, ACTBackboneCapture
+from .policies.cross_attention import (
+    CrossAttentionCapture,
+    find_cross_attention_blocks,
+    vision_importance_to_grids,
+)
 from .policies.groot import GR00TAttention, GR00TN1d6Attention
 from .policies.pi0 import Pi05Attention, Pi0Attention, Pi0FastAttention
 from .policies.smolvla import SmolVLAAttention, VisionAttentionCapture
@@ -19,6 +24,7 @@ except PackageNotFoundError:
 __all__ = [
     "ACTAttention",
     "ACTBackboneCapture",
+    "CrossAttentionCapture",
     "GR00TAttention",
     "GR00TN1d6Attention",
     "Pi05Attention",
@@ -27,7 +33,9 @@ __all__ = [
     "SmolVLAAttention",
     "VisionAttentionCapture",
     "__version__",
+    "find_cross_attention_blocks",
     "log_attention_overlay",
     "patch_heatmap_to_image",
     "rollout_to_patch_heatmap",
+    "vision_importance_to_grids",
 ]

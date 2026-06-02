@@ -68,3 +68,33 @@ class TestPatchHeatmapToImage:
         heat = torch.zeros(2, 2, dtype=torch.int64)
         out = patch_heatmap_to_image(heat, target_hw=(4, 4))
         assert np.issubdtype(out.dtype, np.floating)
+
+    def test_suppress_outliers_off_by_default(self):
+        # Default path must be unchanged — a lone spike still saturates to 1.0.
+        heat = torch.full((4, 4), 0.1)
+        heat[0, 0] = 100.0  # attention-sink-like spike
+        out = patch_heatmap_to_image(heat, target_hw=(8, 8), clip_percentile=95.0)
+        assert out.max() == pytest.approx(1.0, abs=1e-6)
+
+    def test_suppress_outliers_winsorizes_spike(self):
+        # A single huge spike on an otherwise flat grid: with suppression the
+        # spike is pulled down to median+6·MAD. Here MAD of a near-flat grid is 0,
+        # so the spike collapses to the median → the whole map normalizes to ~flat.
+        heat = torch.full((4, 4), 0.1)
+        heat[0, 0] = 100.0
+        out = patch_heatmap_to_image(
+            heat, target_hw=(8, 8), clip_percentile=95.0, suppress_outliers=True
+        )
+        # Without suppression the spike corner would be 1.0; suppressed, the map
+        # has no dominating hot spot (range collapses toward 0).
+        assert out.max() < 0.5
+
+    def test_suppress_outliers_preserves_real_structure(self):
+        # A graded ramp (no outliers) should survive suppression largely intact —
+        # median+6·MAD sits above the real range, so nothing is clipped.
+        heat = torch.linspace(0.0, 1.0, 16).reshape(4, 4)
+        out_plain = patch_heatmap_to_image(heat, target_hw=(4, 4), clip_percentile=100.0)
+        out_supp = patch_heatmap_to_image(
+            heat, target_hw=(4, 4), clip_percentile=100.0, suppress_outliers=True
+        )
+        np.testing.assert_allclose(out_plain, out_supp, atol=1e-6)

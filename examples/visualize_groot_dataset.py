@@ -4,10 +4,22 @@ No robot hardware required — loads camera frames directly from the dataset and
 feeds them through the policy exactly as the live eval loop would, then logs
 image / heatmap / overlay per camera to rerun.
 
-Groot uses Eagle-2's SigLIP vision encoder. The attention visualizer hooks the
-same q_proj / k_proj layers as SmolVLA, but all cameras are batched into a
-single vision-model forward so `GR00TAttention` splits the resulting Q/K
-tensors by camera index rather than snapshotting between per-camera calls.
+Two overlays are streamed per camera (navigate to each in the rerun viewer):
+
+  attention/<cam>/encoder/*   SigLIP vision-encoder self-attention rollout —
+                              what the (frozen) image encoder finds salient.
+  attention/<cam>/action/*    action-head cross-attention — which vision tokens
+                              the flow-matching denoiser actually attends to
+                              while producing the action. THIS is the signal
+                              that moves when you fine-tune; watch it for
+                              grounding bugs. (Set cross_attention=False on
+                              GR00TAttention to stream only the encoder view.)
+
+Groot uses Eagle-2's SigLIP vision encoder. The encoder overlay hooks the same
+q_proj / k_proj layers as SmolVLA, but all cameras are batched into a single
+vision-model forward so `GR00TAttention` splits the resulting Q/K tensors by
+camera index. The action overlay hooks the cross-attending DiT blocks in the
+action head — see docs/groot_adapter.md.
 
 Usage
 -----
@@ -68,9 +80,16 @@ TASK_DESCRIPTION = ""       # must match the task description used during record
 
 EMBODIMENT_TAG   = "new_embodiment"  # matches GR00T's SO-100/101 embodiment
 EPISODE_IDX      = 0       # which episode to replay
-LAST_LAYER_ONLY  = True    # True = crisper maps; False = full attention rollout
+# False = full attention rollout (smoother, recommended). True = raw last-layer
+# self-attention, which is dominated by SigLIP attention-sink / register patches
+# and reads as splotchy noise — only useful for inspecting a single layer.
+LAST_LAYER_ONLY  = False
 PLAYBACK_FPS     = 10      # pacing; set to None to run as fast as possible
 CLIP_PERCENTILE  = 95.0    # suppress SigLIP edge artifacts (lower = more clipping)
+# Opt-in artifact suppression: winsorize SigLIP attention-sink / register spikes
+# (median + 6·MAD) so they don't read as splotches. Flip to True and re-run to
+# A/B against the default in the rerun viewer. Mainly affects the encoder view.
+SUPPRESS_OUTLIERS = False
 # ---------------------------------------------------------------------------
 
 if not DATASET_REPO_ID:
@@ -165,7 +184,7 @@ with viz:
             policy.predict_action_chunk(batch)
 
         # drain_rollouts() + rr.log() happen here, outside the timed window.
-        viz.log_overlay(obs, clip_percentile=CLIP_PERCENTILE)
+        viz.log_overlay(obs, clip_percentile=CLIP_PERCENTILE, suppress_outliers=SUPPRESS_OUTLIERS)
 
         step = frame_idx + 1
         if step % 10 == 0:
@@ -174,4 +193,4 @@ with viz:
         elapsed = time.perf_counter() - t0
         time.sleep(max(0.0, interval - elapsed))
 
-print("Done. Check the rerun viewer under attention/<cam>/.")
+print("Done. Check the rerun viewer under attention/<cam>/encoder/ and /action/.")

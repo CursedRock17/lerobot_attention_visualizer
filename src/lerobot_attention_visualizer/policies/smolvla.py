@@ -364,7 +364,14 @@ class SmolVLAAttention:
             if k.startswith(prefix)
         ]
 
-    def log_overlay(self, obs: dict, *, prefix: str = "attention", clip_percentile: float = 95.0) -> None:
+    def log_overlay(
+        self,
+        obs: dict,
+        *,
+        prefix: str = "attention",
+        clip_percentile: float = 95.0,
+        suppress_outliers: bool = False,
+    ) -> None:
         """Compute rollouts from pending snapshots, then stream image / heatmap / overlay per camera.
 
         No-op if no forward happened since the last call. Rollout compute (matmul
@@ -373,6 +380,9 @@ class SmolVLAAttention:
 
         If the rollout count drifts from the camera count (a missed hook), we drop
         the frame rather than misalign overlays.
+
+        `suppress_outliers` winsorizes SigLIP attention-sink spikes — see
+        `patch_heatmap_to_image`.
         """
         # Compute rollouts now, outside the timed inference window.
         rollouts = self._capture.drain_rollouts(last_layer_only=self._last_layer_only)
@@ -389,5 +399,10 @@ class SmolVLAAttention:
             if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
                 continue
             patch_heat = rollout_to_patch_heatmap(rollout)
-            heat = patch_heatmap_to_image(patch_heat, target_hw=image.shape[:2], clip_percentile=clip_percentile)
+            heat = patch_heatmap_to_image(
+                patch_heat,
+                target_hw=image.shape[:2],
+                clip_percentile=clip_percentile,
+                suppress_outliers=suppress_outliers,
+            )
             log_attention_overlay(f"{prefix}/{cam_key}", image, heat)

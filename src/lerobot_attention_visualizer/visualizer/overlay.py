@@ -14,9 +14,11 @@ def rollout_to_patch_heatmap(rollout: torch.Tensor) -> torch.Tensor:
     """Reduce a (seq, seq) rollout into a (patch_grid_h, patch_grid_w) heatmap.
 
     SigLIP / Idefics3 vision tokens are a flat sequence of patches with no CLS
-    token. We therefore summarize per-patch importance as the total attention
-    flowing OUT of each patch (row-sum over the rollout). This is the standard
-    trick when the encoder has no class token to query against.
+    token. We therefore summarize per-patch importance as the attention each
+    patch *receives*, averaged across all queries — i.e. the column-mean of the
+    rollout (`mean(dim=0)`, since `rollout[i, j]` is query i attending to key j).
+    This is the standard trick when the encoder has no class token to query
+    against.
     """
     if rollout.ndim == 3:
         # Strip batch dim — we only ever pass batch size 1 through the policy.
@@ -39,6 +41,7 @@ def patch_heatmap_to_image(
     heatmap: torch.Tensor,
     target_hw: tuple[int, int],
     clip_percentile: float = 95.0,
+    suppress_outliers: bool = False,
 ) -> np.ndarray:
     """Upsample a (h_p, w_p) patch heatmap to `target_hw` and normalize to [0, 1].
 
@@ -47,9 +50,24 @@ def patch_heatmap_to_image(
     spots at edge patches; capping at the 95th percentile suppresses those
     structural artifacts so semantic content (e.g. the object being grasped)
     fills the color scale instead.
+
+    `suppress_outliers` (opt-in) additionally winsorizes the *patch grid* — before
+    upsampling — to a robust upper bound `median + 6·MAD`. SigLIP attention-sink /
+    register patches show up as a handful of isolated spikes that read as
+    splotches; pulling them down to the top of the real-signal range lets them
+    blend in instead of dominating. `clip_percentile` only caps the *upsampled*
+    distribution (a percentile keeps the spikes at full brightness); this removes
+    them at the source. Left off by default so the map stays faithful unless asked.
     """
+    h = heatmap.float()
+    if suppress_outliers:
+        flat = h.reshape(-1)
+        med = flat.median()
+        mad = (flat - med).abs().median()
+        upper = med + 6.0 * mad
+        h = torch.minimum(h, upper)
     # Add batch + channel dims for torch interpolate.
-    h = heatmap.float()[None, None]  # (1, 1, H, W)
+    h = h[None, None]  # (1, 1, H, W)
     # Bilinear upsample from patch grid to full image resolution.
     h = F.interpolate(h, size=target_hw, mode="bilinear", align_corners=False)[0, 0]
     # Percentile-clip then normalize so positional artifacts don't dominate.

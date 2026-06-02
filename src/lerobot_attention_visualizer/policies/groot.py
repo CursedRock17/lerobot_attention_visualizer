@@ -5,6 +5,7 @@ Two adapters are provided:
 GR00TAttention
     Wraps lerobot's `GrootPolicy` (Groot N1.5). Attribute path:
         policy._groot_model.backbone.eagle_model.vision_model
+        policy._groot_model.action_head.model            (the cross-attn DiT)
 
 GR00TN1d6Attention
     Wraps Isaac-GR00T's native `Gr00tPolicy` (Groot N1.6 / Gr00tN1d6).
@@ -12,26 +13,34 @@ GR00TN1d6Attention
     lerobot's `GrootPolicy.from_pretrained` cannot load N1.6 checkpoints.
     Attribute path:
         policy.model.backbone.eagle_model.vision_model
+        policy.model.action_head.model
 
-Both share the same Eagle-2 / SigLIP vision encoder architecture and the
-same `VisionAttentionCapture` + `snapshot_split` capture strategy.
+Both share the same Eagle-2 / SigLIP vision encoder and the same flow-matching
+action head, so they share one base class `_EagleCrossAttention`.
 
-# Why two adapters?
+# Two complementary signals
 
-    N1.5 checkpoint → lerobot GrootPolicy → GR00TAttention
-    N1.6 checkpoint → Isaac-GR00T Gr00tPolicy → GR00TN1d6Attention
-    N1.7 checkpoint → Isaac-GR00T, Qwen3-VL backbone → not supported (no SigLIP)
+This adapter streams **two** overlays per camera:
 
-# Capture strategy (shared)
+`attention/<cam>/encoder/*`
+    SigLIP vision-encoder self-attention rollout — "which patches the (usually
+    frozen) image encoder finds salient to represent." Captured via
+    `VisionAttentionCapture` + `snapshot_split` (Eagle batches all cameras into
+    one `forward_eagle`, so Q/K emerge as `(N_cameras, n_patches, dim)` and we
+    slice along dim 0).
 
-Eagle-2 processes all camera images in a single batched forward
-(`forward_eagle`). Q/K tensors emerge shaped `(N_cameras, n_patches, dim)`.
-We patch `forward_eagle` and call `snapshot_split(n_cameras)` to slice
-along dim 0, producing one _LayerCache per camera. `drain_rollouts()` then
-computes per-camera rollouts identically to the SmolVLA path.
+`attention/<cam>/action/*`
+    Action-head cross-attention — "which vision tokens the flow-matching
+    denoiser actually looks at while producing the action." Captured via
+    `CrossAttentionCapture` on the DiT's cross-attending blocks. This is the
+    signal that changes when you fine-tune the action head, so it is the one to
+    watch for grounding bugs. See `cross_attention.py` for the mechanism.
 
-Groot's processor hardcodes `max_dynamic_tiles=1`, so the batch dim always
-equals N_cameras (no dynamic image tiling).
+The vision tokens the action head attends to are NOT the 729 raw SigLIP patches:
+Eagle pixel-shuffles them down (downsample 0.5 → 256 tokens, a 16×16 grid per
+camera) before they enter the LLM sequence. We recover their columns from
+`eagle_input_ids == image_token_index`, captured inside the patched
+`forward_eagle`.
 """
 
 from __future__ import annotations
@@ -45,70 +54,98 @@ from ..visualizer.overlay import (
     patch_heatmap_to_image,
     rollout_to_patch_heatmap,
 )
+from .cross_attention import (
+    CrossAttentionCapture,
+    find_cross_attention_blocks,
+    vision_importance_to_grids,
+)
 from .smolvla import VisionAttentionCapture
 
 if TYPE_CHECKING:
     from lerobot.policies.groot.modeling_groot import GrootPolicy
 
 
-class GR00TAttention:
-    """High-level: GrootPolicy wrapper that streams per-camera attention to rerun.
+class _EagleCrossAttention:
+    """Shared base for the N1.5 and N1.6 Groot adapters.
 
-    Locates the SigLIP vision encoder inside Eagle-2, installs q_proj / k_proj
-    hooks, and patches `forward_eagle` to snapshot all-camera Q/K tensors after
-    each batched vision-encoder forward. `log_overlay(obs)` drains the captured
-    rollouts and writes three rerun streams per camera (image / attention / overlay).
-
-    Usage:
-        viz = GR00TAttention(policy)
-        with viz:
-            action = policy.select_action(batch)
-            viz.log_overlay(obs)
+    Subclasses resolve the two model-root-dependent attribute paths (the Eagle
+    vision model and the action head live under `_groot_model` for N1.5 and under
+    `model` for N1.6) and supply `camera_keys()`. Everything else — installing
+    the encoder + cross-attention captures, patching `forward_eagle`, and logging
+    both overlays — is shared here.
     """
 
-    def __init__(self, policy: "GrootPolicy", *, last_layer_only: bool = False):
+    def __init__(
+        self,
+        policy,
+        *,
+        vision_model,
+        model_root,
+        last_layer_only: bool,
+        cross_attention: bool,
+    ):
         self.policy = policy
+        self._model_root = model_root
         self._last_layer_only = last_layer_only
+        self._cross_enabled = cross_attention
 
-        # Navigate to the SigLIP encoder inside Eagle-2.
-        vision_model = policy._groot_model.backbone.eagle_model.vision_model
         self._capture = VisionAttentionCapture(vision_model)
+        self._cross: CrossAttentionCapture | None = None
         self._orig_forward_eagle = None
+        # Vision-token column mask over the VL key sequence, captured per forward.
+        self._vision_mask = None
 
     def camera_keys(self) -> list[str]:
-        """Bare camera names in the order the policy feeds them to the vision encoder."""
-        prefix = "observation.images."
-        return [
-            k[len(prefix):]
-            for k in self.policy.config.image_features
-            if k.startswith(prefix)
-        ]
+        raise NotImplementedError
 
-    def __enter__(self) -> GR00TAttention:
+    def _image_token_index(self) -> int:
+        """The token id Eagle replaces with vision embeddings (input_ids == this)."""
+        eagle_model = self._model_root.backbone.eagle_model
+        idx = getattr(eagle_model, "image_token_index", None)
+        if idx is None:
+            idx = eagle_model.config.image_token_index
+        return idx
+
+    def __enter__(self) -> "_EagleCrossAttention":
         self._capture.__enter__()
-
-        # Patch forward_eagle so we can snapshot immediately after the single
-        # batched vision-model forward that processes all cameras at once.
-        orig = self.policy._groot_model.backbone.forward_eagle
+        n_cameras = len(self.camera_keys())
+        backbone = self._model_root.backbone
+        orig = backbone.forward_eagle
         self._orig_forward_eagle = orig
         capture = self._capture
-        n_cameras = len(self.camera_keys())
+
+        img_tok = None
+        if self._cross_enabled:
+            cross_blocks = find_cross_attention_blocks(
+                self._model_root.action_head.model.transformer_blocks
+            )
+            self._cross = CrossAttentionCapture(cross_blocks)
+            self._cross.__enter__()
+            img_tok = self._image_token_index()
 
         def _patched_forward_eagle(vl_input):
             result = orig(vl_input)
-            # Q/K shape at this point: (N_cameras, n_patches, embed_dim).
-            # snapshot_split slices dim 0 into one _LayerCache per camera.
+            # Q/K shape here: (N_cameras, n_patches, embed_dim). snapshot_split
+            # slices dim 0 into one _LayerCache per camera for the encoder path.
             capture.snapshot_split(n_cameras)
+            if self._cross is not None:
+                # Vision tokens are the columns of the VL key sequence where the
+                # eagle input id is the image placeholder. Order is camera-major.
+                input_ids = vl_input["eagle_input_ids"]
+                self._vision_mask = (input_ids[0] == img_tok).detach().cpu()
             return result
 
-        self.policy._groot_model.backbone.forward_eagle = _patched_forward_eagle
+        backbone.forward_eagle = _patched_forward_eagle
         return self
 
     def __exit__(self, *exc) -> None:
         if self._orig_forward_eagle is not None:
-            self.policy._groot_model.backbone.forward_eagle = self._orig_forward_eagle
+            self._model_root.backbone.forward_eagle = self._orig_forward_eagle
             self._orig_forward_eagle = None
         self._capture.__exit__(*exc)
+        if self._cross is not None:
+            self._cross.__exit__(*exc)
+            self._cross = None
 
     def log_overlay(
         self,
@@ -116,35 +153,94 @@ class GR00TAttention:
         *,
         prefix: str = "attention",
         clip_percentile: float = 95.0,
+        suppress_outliers: bool = False,
     ) -> None:
-        """Compute rollouts from pending snapshots and stream to rerun.
+        """Stream the encoder overlay and the action cross-attention overlay.
 
-        No-op if no forward happened since the last call. Drops the frame
-        silently if the rollout count doesn't match the camera count.
+        No-op if no forward happened since the last call. Each signal is dropped
+        independently if its token count doesn't match the camera count, rather
+        than misaligning overlays.
+
+        `suppress_outliers` winsorizes SigLIP attention-sink spikes — see
+        `patch_heatmap_to_image`. It mainly helps the encoder view; the action
+        view rarely needs it, but the flag is applied to both for consistency.
         """
-        rollouts = self._capture.drain_rollouts(last_layer_only=self._last_layer_only)
-        if not rollouts:
-            return
-
         camera_keys = self.camera_keys()
-        if len(rollouts) != len(camera_keys):
-            return
+        n = len(camera_keys)
 
-        for cam_key, rollout in zip(camera_keys, rollouts, strict=True):
-            image = obs.get(cam_key)
-            if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
-                continue
-            patch_heat = rollout_to_patch_heatmap(rollout)
-            heat = patch_heatmap_to_image(
-                patch_heat,
-                target_hw=image.shape[:2],
-                clip_percentile=clip_percentile,
-            )
-            log_attention_overlay(f"{prefix}/{cam_key}", image, heat)
+        # --- Encoder self-attention (always on) ---
+        rollouts = self._capture.drain_rollouts(last_layer_only=self._last_layer_only)
+        if rollouts and len(rollouts) == n:
+            for cam_key, rollout in zip(camera_keys, rollouts, strict=True):
+                image = obs.get(cam_key)
+                if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
+                    continue
+                patch_heat = rollout_to_patch_heatmap(rollout)
+                heat = patch_heatmap_to_image(
+                    patch_heat,
+                    target_hw=image.shape[:2],
+                    clip_percentile=clip_percentile,
+                    suppress_outliers=suppress_outliers,
+                )
+                log_attention_overlay(f"{prefix}/{cam_key}/encoder", image, heat)
+
+        # --- Action-head cross-attention (the action-driving signal) ---
+        importance = self._cross.drain() if self._cross is not None else None
+        if importance is not None and self._vision_mask is not None:
+            grids = vision_importance_to_grids(importance, self._vision_mask, n)
+            if len(grids) == n:
+                for cam_key, grid in zip(camera_keys, grids, strict=True):
+                    image = obs.get(cam_key)
+                    if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
+                        continue
+                    heat = patch_heatmap_to_image(
+                        grid,
+                        target_hw=image.shape[:2],
+                        clip_percentile=clip_percentile,
+                        suppress_outliers=suppress_outliers,
+                    )
+                    log_attention_overlay(f"{prefix}/{cam_key}/action", image, heat)
 
 
-class GR00TN1d6Attention:
-    """High-level: Isaac-GR00T Gr00tPolicy (N1.6) wrapper for rerun attention streaming.
+class GR00TAttention(_EagleCrossAttention):
+    """High-level: lerobot GrootPolicy (N1.5) wrapper streaming both overlays to rerun.
+
+    Usage:
+        viz = GR00TAttention(policy)
+        with viz:
+            action = policy.select_action(batch)
+            viz.log_overlay(obs)
+
+    Pass `cross_attention=False` to stream only the encoder overlay.
+    """
+
+    def __init__(
+        self,
+        policy: "GrootPolicy",
+        *,
+        last_layer_only: bool = False,
+        cross_attention: bool = True,
+    ):
+        super().__init__(
+            policy,
+            vision_model=policy._groot_model.backbone.eagle_model.vision_model,
+            model_root=policy._groot_model,
+            last_layer_only=last_layer_only,
+            cross_attention=cross_attention,
+        )
+
+    def camera_keys(self) -> list[str]:
+        """Bare camera names in the order the policy feeds them to the encoder."""
+        prefix = "observation.images."
+        return [
+            k[len(prefix):]
+            for k in self.policy.config.image_features
+            if k.startswith(prefix)
+        ]
+
+
+class GR00TN1d6Attention(_EagleCrossAttention):
+    """High-level: Isaac-GR00T Gr00tPolicy (N1.6) wrapper streaming both overlays.
 
     Use this for checkpoints with `"model_type": "Gr00tN1d6"` loaded via:
 
@@ -159,12 +255,11 @@ class GR00TN1d6Attention:
             action = policy.get_action(obs)
             viz.log_overlay(obs)
 
-    camera_keys must match the bare names used in your obs dict
-    (e.g. "ego", "external" — without the "observation.images." prefix).
+    camera_keys must match the bare names used in your obs dict (e.g. "ego",
+    "external" — without the "observation.images." prefix).
 
     The Isaac-GR00T `Gr00tPolicy` stores the loaded model at `policy.model`
-    (not `policy._groot_model` as in lerobot's wrapper). Everything else —
-    Eagle backbone, forward_eagle, snapshot_split — is identical to N1.5.
+    (not `policy._groot_model`). Everything else is identical to N1.5.
     """
 
     def __init__(
@@ -173,67 +268,16 @@ class GR00TN1d6Attention:
         *,
         camera_keys: list[str],
         last_layer_only: bool = False,
+        cross_attention: bool = True,
     ):
-        self.policy = policy
+        super().__init__(
+            policy,
+            vision_model=policy.model.backbone.eagle_model.vision_model,
+            model_root=policy.model,
+            last_layer_only=last_layer_only,
+            cross_attention=cross_attention,
+        )
         self._camera_keys = camera_keys
-        self._last_layer_only = last_layer_only
-
-        # Isaac-GR00T: policy.model is the Gr00tN1d6 PreTrainedModel instance.
-        vision_model = policy.model.backbone.eagle_model.vision_model
-        self._capture = VisionAttentionCapture(vision_model)
-        self._orig_forward_eagle = None
 
     def camera_keys(self) -> list[str]:
         return self._camera_keys
-
-    def __enter__(self) -> GR00TN1d6Attention:
-        self._capture.__enter__()
-
-        orig = self.policy.model.backbone.forward_eagle
-        self._orig_forward_eagle = orig
-        capture = self._capture
-        n_cameras = len(self._camera_keys)
-
-        def _patched_forward_eagle(vl_input):
-            result = orig(vl_input)
-            capture.snapshot_split(n_cameras)
-            return result
-
-        self.policy.model.backbone.forward_eagle = _patched_forward_eagle
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self._orig_forward_eagle is not None:
-            self.policy.model.backbone.forward_eagle = self._orig_forward_eagle
-            self._orig_forward_eagle = None
-        self._capture.__exit__(*exc)
-
-    def log_overlay(
-        self,
-        obs: dict,
-        *,
-        prefix: str = "attention",
-        clip_percentile: float = 95.0,
-    ) -> None:
-        """Compute rollouts from pending snapshots and stream to rerun.
-
-        No-op if no forward happened since the last call.
-        """
-        rollouts = self._capture.drain_rollouts(last_layer_only=self._last_layer_only)
-        if not rollouts:
-            return
-
-        if len(rollouts) != len(self._camera_keys):
-            return
-
-        for cam_key, rollout in zip(self._camera_keys, rollouts, strict=True):
-            image = obs.get(cam_key)
-            if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
-                continue
-            patch_heat = rollout_to_patch_heatmap(rollout)
-            heat = patch_heatmap_to_image(
-                patch_heat,
-                target_hw=image.shape[:2],
-                clip_percentile=clip_percentile,
-            )
-            log_attention_overlay(f"{prefix}/{cam_key}", image, heat)

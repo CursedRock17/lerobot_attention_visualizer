@@ -61,7 +61,9 @@ ROBOT_TYPE       = "so101_follower"
 
 # Attention visualization — set False to run plain eval with zero capture overhead.
 ATTENTION_ENABLED = True
-LAST_LAYER_ONLY   = True   # True = crisper SigLIP maps; False = full rollout
+# False = full attention rollout (smoother, recommended). True = raw last-layer
+# self-attention, dominated by SigLIP attention-sink / register patches (splotchy).
+LAST_LAYER_ONLY   = False
 CLIP_PERCENTILE   = 95.0   # suppress SigLIP edge artifacts
 
 # Control rate — Groot refills its action queue every n_action_steps control steps,

@@ -18,16 +18,16 @@ Covers the Groot-specific gaps:
 
 from __future__ import annotations
 
-import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
+import numpy as np
 import torch
 import torch.nn as nn
 
 from lerobot_attention_visualizer import GR00TAttention
 from lerobot_attention_visualizer.policies.smolvla import VisionAttentionCapture
+from lerobot_attention_visualizer.visualizer import overlay as overlay_mod
 from lerobot_attention_visualizer.visualizer.overlay import rollout_to_patch_heatmap
 
 
@@ -93,17 +93,82 @@ class _SigLIPVisionModel(nn.Module):
         return SimpleNamespace(last_hidden_state=hidden)
 
 
+IMAGE_TOKEN_INDEX = 99  # sentinel id Eagle replaces with vision embeddings
+
+
+class _DiffusersAttn(nn.Module):
+    """Mimics diffusers Attention: to_q/to_k/to_v + `heads`. Cross iff kv_dim != query_dim."""
+
+    def __init__(self, query_dim: int, kv_dim: int, heads: int = 4):
+        super().__init__()
+        self.heads = heads
+        self.to_q = nn.Linear(query_dim, query_dim, bias=False)
+        self.to_k = nn.Linear(kv_dim, query_dim, bias=False)
+        self.to_v = nn.Linear(kv_dim, query_dim, bias=False)
+
+    def forward(self, hidden_states, encoder_hidden_states=None):
+        kv = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
+        self.to_q(hidden_states)
+        self.to_k(kv)
+        self.to_v(kv)
+        return hidden_states
+
+
+class _DiTBlock(nn.Module):
+    def __init__(self, query_dim: int, kv_dim: int, cross: bool, heads: int = 4):
+        super().__init__()
+        self.attn1 = _DiffusersAttn(query_dim, kv_dim if cross else query_dim, heads)
+        self._cross = cross
+
+    def forward(self, hidden, vl):
+        self.attn1(hidden, encoder_hidden_states=vl if self._cross else None)
+
+
+class _MockDiT(nn.Module):
+    """Interleaved DiT: even blocks cross-attend to vl, odd blocks self-attend."""
+
+    def __init__(self, query_dim: int, kv_dim: int, heads: int = 4, num_layers: int = 4):
+        super().__init__()
+        self.transformer_blocks = nn.ModuleList(
+            [_DiTBlock(query_dim, kv_dim, cross=(i % 2 == 0), heads=heads) for i in range(num_layers)]
+        )
+
+    def run_denoiser(self, hidden, vl, steps: int = 2):
+        for _ in range(steps):
+            for b in self.transformer_blocks:
+                b(hidden, vl)
+
+
+def _vl_input(num_cameras: int, vision_per_cam: int, n_text: int = 2):
+    """Build a mock eagle vl_input dict with image-token placeholders.
+
+    Layout per camera: `n_text` text tokens then `vision_per_cam` image tokens,
+    so the vision columns appear in camera order (mirrors Eagle's prompt).
+    """
+    ids: list[int] = []
+    for _ in range(num_cameras):
+        ids.extend([1] * n_text)
+        ids.extend([IMAGE_TOKEN_INDEX] * vision_per_cam)
+    return {"eagle_input_ids": torch.tensor([ids])}  # (1, seq_len)
+
+
 def _make_mock_groot_policy(
     num_cameras: int = 2,
     num_patches: int = 16,
     embed_dim: int = 64,
     num_heads: int = 8,
     num_layers: int = 4,
+    *,
+    dit_query_dim: int = 32,
+    dit_kv_dim: int = 48,
+    dit_heads: int = 4,
+    dit_layers: int = 4,
 ):
     """Build a mock matching Groot's attribute paths.
 
     GR00TAttention navigates:
         policy._groot_model.backbone.eagle_model.vision_model
+        policy._groot_model.action_head.model.transformer_blocks   (cross-attn DiT)
 
     GR00TAttention patches:
         policy._groot_model.backbone.forward_eagle
@@ -121,17 +186,19 @@ def _make_mock_groot_policy(
         forward_eagle_calls.append(vl_input)
         return SimpleNamespace(backbone_features=torch.randn(1, num_patches, embed_dim))
 
-    eagle_model = SimpleNamespace(vision_model=vision_model)
+    eagle_model = SimpleNamespace(vision_model=vision_model, image_token_index=IMAGE_TOKEN_INDEX)
+    dit = _MockDiT(dit_query_dim, dit_kv_dim, dit_heads, dit_layers)
     backbone = SimpleNamespace(
         eagle_model=eagle_model,
         forward_eagle=forward_eagle,
     )
+    action_head = SimpleNamespace(model=dit)
     config = SimpleNamespace(
         image_features={
             f"observation.images.cam{i}": object() for i in range(num_cameras)
         }
     )
-    _groot_model = SimpleNamespace(backbone=backbone)
+    _groot_model = SimpleNamespace(backbone=backbone, action_head=action_head)
     policy = SimpleNamespace(
         _groot_model=_groot_model,
         config=config,
@@ -230,7 +297,7 @@ class TestGR00TAttentionLifecycle:
         policy, fe_calls = _make_mock_groot_policy(num_cameras=num_cameras)
         viz = GR00TAttention(policy)
         with viz:
-            policy._groot_model.backbone.forward_eagle(object())
+            policy._groot_model.backbone.forward_eagle(_vl_input(num_cameras, 4))
             assert len(viz._capture._pending) == num_cameras
             assert len(fe_calls) == 1
 
@@ -250,7 +317,7 @@ class TestGR00TAttentionLifecycle:
         policy, _ = _make_mock_groot_policy(num_cameras=2)
         viz = GR00TAttention(policy)
         with viz:
-            policy._groot_model.backbone.forward_eagle(object())
+            policy._groot_model.backbone.forward_eagle(_vl_input(2, 4))
             assert len(viz._capture._pending) == 2
             # Manually corrupt camera count to trigger drift guard
             viz._capture._pending.append(viz._capture._pending[0])  # add phantom entry
@@ -261,7 +328,7 @@ class TestGR00TAttentionLifecycle:
         policy, _ = _make_mock_groot_policy(num_cameras=2, num_patches=16)
         viz = GR00TAttention(policy)
         with viz:
-            policy._groot_model.backbone.forward_eagle(object())
+            policy._groot_model.backbone.forward_eagle(_vl_input(2, 4))
             assert len(viz._capture._pending) == 2
             rollouts = viz._capture.drain_rollouts()
             assert len(viz._capture._pending) == 0
@@ -272,9 +339,81 @@ class TestGR00TAttentionLifecycle:
         policy, _ = _make_mock_groot_policy(num_cameras=1, num_patches=n_patches)
         viz = GR00TAttention(policy, last_layer_only=True)
         with viz:
-            policy._groot_model.backbone.forward_eagle(object())
+            policy._groot_model.backbone.forward_eagle(_vl_input(1, 4))
             rollouts = viz._capture.drain_rollouts(last_layer_only=True)
         assert rollouts[0].shape == (1, n_patches, n_patches)
+
+
+# ---------------------------------------------------------------------------
+# GR00TAttention action-head cross-attention
+# ---------------------------------------------------------------------------
+
+class TestGR00TCrossAttention:
+    def test_enter_hooks_only_cross_blocks(self):
+        # dit_layers=4 → 2 cross blocks; each cross block adds 2 hooks (q + k).
+        policy, _ = _make_mock_groot_policy(num_cameras=2, dit_layers=4)
+        viz = GR00TAttention(policy)
+        with viz:
+            assert viz._cross is not None
+            assert len(viz._cross._modules) == 2
+            assert len(viz._cross._handles) == 4
+
+    def test_exit_removes_cross_hooks(self):
+        policy, _ = _make_mock_groot_policy(num_cameras=2)
+        viz = GR00TAttention(policy)
+        with viz:
+            pass
+        assert viz._cross is None
+
+    def test_cross_attention_disabled(self):
+        policy, _ = _make_mock_groot_policy(num_cameras=2)
+        viz = GR00TAttention(policy, cross_attention=False)
+        with viz:
+            assert viz._cross is None
+            policy._groot_model.backbone.forward_eagle(_vl_input(2, 4))
+            # No cross capture → vision_mask never populated.
+            assert viz._vision_mask is None
+
+    def test_forward_eagle_populates_vision_mask(self):
+        vision_per_cam = 4
+        policy, _ = _make_mock_groot_policy(num_cameras=2)
+        viz = GR00TAttention(policy)
+        with viz:
+            policy._groot_model.backbone.forward_eagle(_vl_input(2, vision_per_cam))
+            assert viz._vision_mask is not None
+            # 2 cameras × 4 vision tokens = 8 True entries.
+            assert int(viz._vision_mask.sum()) == 2 * vision_per_cam
+
+    def test_log_overlay_streams_action_overlay(self, monkeypatch):
+        # End-to-end: forward_eagle + a simulated denoiser run, then log_overlay
+        # should emit action/* streams for each camera.
+        logged: list[str] = []
+        monkeypatch.setattr(overlay_mod.rr, "log", lambda path, *a, **k: logged.append(path))
+
+        num_cameras, vision_per_cam = 2, 4  # 2×2 grid per camera
+        policy, _ = _make_mock_groot_policy(
+            num_cameras=num_cameras, dit_query_dim=32, dit_kv_dim=48, dit_layers=4
+        )
+        viz = GR00TAttention(policy)
+        dit = policy._groot_model.action_head.model
+
+        with viz:
+            vl_in = _vl_input(num_cameras, vision_per_cam)
+            policy._groot_model.backbone.forward_eagle(vl_in)
+            # Simulate the flow-matching denoiser: vl key length == eagle seq len.
+            vl_len = vl_in["eagle_input_ids"].shape[1]
+            hidden = torch.randn(1, 6, 32)
+            vl = torch.randn(1, vl_len, 48)
+            dit.run_denoiser(hidden, vl, steps=3)
+
+            obs = {f"cam{i}": np.zeros((48, 48, 3), dtype=np.uint8) for i in range(num_cameras)}
+            viz.log_overlay(obs)
+
+        action_paths = [p for p in logged if "/action/" in p]
+        # 3 streams (image/attention/overlay) × 2 cameras.
+        assert len(action_paths) == 6
+        assert any("cam0/action/overlay" in p for p in action_paths)
+        assert any("cam1/action/overlay" in p for p in action_paths)
 
 
 # ---------------------------------------------------------------------------

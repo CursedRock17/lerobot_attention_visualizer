@@ -9,16 +9,28 @@ Groot N1.6 policy, which uses the Eagle-2 VLM backbone.
 
 ```
 GrootPolicy
-└── model: GR00TN15
+└── _groot_model: GR00TN15            (N1.6 native loader: policy.model)
     ├── backbone: EagleBackbone
     │   └── eagle_model: Eagle25VLForConditionalGeneration
-    │       ├── vision_model: SiglipVisionModel       ← hook target
+    │       ├── vision_model: SiglipVisionModel       ← ENCODER hook target
     │       │   └── vision_model.encoder.layers[i]
     │       │       └── self_attn  (q_proj, k_proj)   ← Q/K capture points
     │       ├── mlp1                                   ← pixel-shuffle + projection
-    │       └── language_model: Qwen2                 ← not captured
-    └── action_head: ...
+    │       └── language_model: Qwen2                 ← vl token sequence
+    └── action_head: FlowmatchingActionHead
+        └── model: DiT
+            └── transformer_blocks[i].attn1           ← CROSS-ATTN hook target
+                (to_q from action tokens, to_k from vl_embs)
 ```
+
+The adapter captures **two** signals (`cross_attention=True` by default):
+
+- **`attention/<cam>/encoder/*`** — SigLIP vision-encoder self-attention rollout.
+  *What the (frozen) image encoder finds salient.* Hooked on `vision_model`.
+- **`attention/<cam>/action/*`** — DiT cross-attention from the action/denoiser
+  tokens onto the vision tokens. *What actually drives the action* — this is the
+  signal that changes when you fine-tune the action head, so it is the one to
+  watch for grounding bugs. Hooked on the DiT's cross-attending `attn1` blocks.
 
 Eagle-2 uses **SiglipVisionModel** as its vision encoder — the identical architecture
 to SmolVLA's SigLIP tower. The `self_attn.q_proj` / `self_attn.k_proj` layout is
@@ -58,6 +70,59 @@ the per-call snapshot pattern. Instead:
 
 This means `log_overlay` sees exactly `N_cameras` rollouts after each policy forward,
 matching the camera keys from `policy.config.image_features`, just like SmolVLA.
+
+---
+
+## Action-head cross-attention (the action-driving signal)
+
+The encoder rollout above is **vision-encoder self-attention** — and the vision
+encoder is frozen during normal fine-tuning (`tune_visual=False`), so its
+attention barely moves before vs. after a fine-tune. The signal that actually
+drives the autonomous action lives in the **action head**:
+
+```
+FlowmatchingActionHead.get_action:
+    sa_embs = cat([state, future_tokens, action_features])   # QUERIES
+    vl_embs = backbone_features (vision + language tokens)    # KEYS / VALUES
+    DiT(hidden_states=sa_embs, encoder_hidden_states=vl_embs)
+```
+
+The DiT (`cross_attention_dit.py`) interleaves self- and cross-attention blocks.
+Each cross-attending `BasicTransformerBlock.attn1` is a diffusers `Attention`
+whose `to_q` reads the action queries and whose `to_k` reads `vl_embs`. The
+`(action_queries × vl_tokens)` attention matrix, **sliced to the vision-token
+columns**, is "which image patches the denoiser looks at while producing the
+action." `CrossAttentionCapture` (`policies/cross_attention.py`) captures it.
+
+### Three things the capture needs
+
+1. **The cross-attending blocks.** diffusers `Attention` runs through SDPA, so
+   (like SigLIP) the weights are never materialized — we hook `to_q`/`to_k` and
+   recompute `softmax(QK^T/√d)`. Cross blocks are detected statically via
+   `to_q.in_features != to_k.in_features` (`cross_attention_dim ≠ query_dim`),
+   which is more robust than the optional `is_cross_attention` flag.
+
+2. **The vision-token columns of `vl_embs`.** `vl_embs` is the full Eagle LLM
+   sequence — vision tokens interleaved with language tokens. Image tokens sit
+   where `eagle_input_ids == eagle_model.image_token_index`
+   (`modeling_eagle2_5_vl.py:237`). We capture `eagle_input_ids` inside the
+   patched `forward_eagle` and build a boolean column mask. `vlln` +
+   `vl_self_attention` in `process_backbone_output` preserve token order, so the
+   mask aligns with the DiT's key columns.
+
+3. **The post-pixel-shuffle grid.** These vision tokens are **not** the 729 raw
+   SigLIP patches: Eagle pixel-shuffles them (`downsample_ratio=0.5`) to 256
+   tokens — a **16×16 grid per camera** (`extract_feature`, the `1024 → 256`
+   comment). We split the masked importance vector evenly across cameras (image
+   tokens appear camera-major) and `isqrt` each chunk to its grid.
+
+### Aggregation
+
+The flow-matching denoiser runs `num_inference_timesteps` Euler steps, and there
+are several cross-attending layers, so the cross-attention fires many times per
+chunk. `CrossAttentionCapture` reduces each fire over heads and over all query
+rows to a per-key importance vector and accumulates a **running mean over every
+fire** (all steps × all cross-attn layers) for a stable map.
 
 ---
 

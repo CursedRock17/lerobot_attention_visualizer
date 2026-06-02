@@ -48,9 +48,12 @@ preferred for SmolVLA / π0; ACT runs comfortably on CPU.
 
 - **SmolVLA** — attention rollout across the SigLIP ViT layers.
   [`policies/smolvla.py`](src/lerobot_attention_visualizer/policies/smolvla.py).
-- **Groot N1.6** — same SigLIP rollout via Eagle-2's vision encoder. All
-  cameras are batched into one forward pass; the adapter splits Q/K by
-  camera index. Requires `flash-attn` — see [Groot install](#groot-n16)
+- **Groot N1.5 / N1.6** — streams **two** signals per camera: the SigLIP
+  encoder rollout (via Eagle-2's vision encoder, all cameras batched into one
+  forward) *and* the action head's cross-attention — which vision tokens the
+  flow-matching denoiser actually attends to while producing the action. The
+  latter is the signal that moves when you fine-tune the action head; watch it
+  for grounding bugs. Requires `flash-attn` — see [Groot install](#groot-n16)
   below. [`policies/groot.py`](src/lerobot_attention_visualizer/policies/groot.py).
 - **π0 / π0.5 / π0-fast** — attention rollout across PaliGemma's vision
   tower. One adapter (`Pi0Attention`) handles all three since they share
@@ -78,6 +81,13 @@ attention/<cam>/overlay     # blended 50/50
 Updated once per RTC chunk (~every 10–20 control steps) for SmolVLA, and
 once per ACT-queue refill (every `n_action_steps`) for ACT — enough to
 read the story without burning compute.
+
+**Groot streams two such groups per camera** — `attention/<cam>/encoder/*`
+(vision-encoder self-attention) and `attention/<cam>/action/*` (action-head
+cross-attention, the signal that moves when you fine-tune). The encoder view
+shows what the frozen image encoder finds salient; the action view shows what
+the denoiser actually attends to. SmolVLA / π0 currently expose the encoder
+view only — action-head cross-attention for those is the next increment.
 
 ## Layout
 
