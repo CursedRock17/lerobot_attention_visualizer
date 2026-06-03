@@ -93,6 +93,8 @@ SUPPRESS_OUTLIERS = False
 # Display contrast. 1.0 = linear. >1 makes the map more "extreme" — crushes
 # background noise toward black and isolates the bright hot spot (try 2–4).
 GAMMA = 1.0
+# Heatmap palette: "hot" (red→yellow→white), "blue-green", or "viridis".
+COLORMAP = "hot"
 # ---------------------------------------------------------------------------
 
 if not DATASET_REPO_ID:
@@ -192,6 +194,7 @@ with viz:
             clip_percentile=CLIP_PERCENTILE,
             suppress_outliers=SUPPRESS_OUTLIERS,
             gamma=GAMMA,
+            colormap=COLORMAP,
         )
 
         step = frame_idx + 1

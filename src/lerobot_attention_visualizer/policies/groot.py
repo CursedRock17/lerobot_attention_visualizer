@@ -167,6 +167,7 @@ class _EagleCrossAttention:
         clip_percentile: float = 95.0,
         suppress_outliers: bool = False,
         gamma: float = 1.0,
+        colormap: str = "hot",
     ) -> None:
         """Stream the encoder overlay and the action cross-attention overlay.
 
@@ -176,8 +177,8 @@ class _EagleCrossAttention:
 
         `suppress_outliers` winsorizes SigLIP attention-sink spikes (mainly helps
         the encoder view) and `gamma` sets the display contrast (>1 = punchier,
-        background suppressed) — see `patch_heatmap_to_image`. Both apply to the
-        encoder and action overlays alike.
+        background suppressed) — see `patch_heatmap_to_image`. `colormap` picks the
+        palette ("hot", "blue-green", "viridis"). All apply to both overlays.
         """
         camera_keys = self.camera_keys()
         n = len(camera_keys)
@@ -197,7 +198,7 @@ class _EagleCrossAttention:
                     suppress_outliers=suppress_outliers,
                     gamma=gamma,
                 )
-                log_attention_overlay(f"{prefix}/{cam_key}/encoder", image, heat)
+                log_attention_overlay(f"{prefix}/{cam_key}/encoder", image, heat, colormap=colormap)
 
         # --- Action-head cross-attention (the action-driving signal) ---
         importance = self._cross.drain() if self._cross is not None else None
@@ -215,7 +216,7 @@ class _EagleCrossAttention:
                         suppress_outliers=suppress_outliers,
                         gamma=gamma,
                     )
-                    log_attention_overlay(f"{prefix}/{cam_key}/action", image, heat)
+                    log_attention_overlay(f"{prefix}/{cam_key}/action", image, heat, colormap=colormap)
 
 
 class GR00TAttention(_EagleCrossAttention):
