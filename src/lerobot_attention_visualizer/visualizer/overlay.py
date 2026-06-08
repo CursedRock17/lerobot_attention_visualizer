@@ -10,7 +10,9 @@ import torch
 import torch.nn.functional as F
 
 
-def rollout_to_patch_heatmap(rollout: torch.Tensor) -> torch.Tensor:
+def rollout_to_patch_heatmap(
+    rollout: torch.Tensor, patch_grid_hw: tuple[int, int] | None = None
+) -> torch.Tensor:
     """Reduce a (seq, seq) rollout into a (patch_grid_h, patch_grid_w) heatmap.
 
     SigLIP / Idefics3 vision tokens are a flat sequence of patches with no CLS
@@ -27,6 +29,13 @@ def rollout_to_patch_heatmap(rollout: torch.Tensor) -> torch.Tensor:
     # Column-mean = average attention received by each patch across all queries.
     importance = rollout.mean(dim=0)  # (seq,)
     n = importance.numel()
+    if patch_grid_hw is not None:
+        h, w = patch_grid_hw
+        if h * w != n:
+            raise ValueError(
+                f"patch_grid_hw {patch_grid_hw} (={h * w}) doesn't match token count {n}."
+            )
+        return importance.view(h, w)
     # SigLIP produces a square patch grid; infer the side length.
     side = int(math.isqrt(n))
     if side * side != n:

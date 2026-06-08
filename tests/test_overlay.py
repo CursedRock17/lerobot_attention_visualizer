@@ -145,3 +145,23 @@ class TestColormap:
     def test_unknown_colormap_raises(self):
         with pytest.raises(ValueError, match="Unknown colormap"):
             _apply_colormap(np.zeros((2, 2)), "rainbow")
+
+
+class TestRolloutPatchGridHW:
+    def test_explicit_rectangular_grid(self):
+        # 12-token rollout reshaped to (3, 4) via patch_grid_hw.
+        rollout = torch.rand(12, 12)
+        heat = rollout_to_patch_heatmap(rollout, patch_grid_hw=(3, 4))
+        assert heat.shape == (3, 4)
+
+    def test_grid_hw_mismatch_raises(self):
+        rollout = torch.rand(12, 12)
+        with pytest.raises(ValueError, match="doesn't match token count"):
+            rollout_to_patch_heatmap(rollout, patch_grid_hw=(3, 3))
+
+    def test_non_square_now_ok_with_grid(self):
+        # 12 isn't square → bare call raises, but patch_grid_hw makes it work.
+        rollout = torch.rand(12, 12)
+        with pytest.raises(ValueError, match="not a perfect square"):
+            rollout_to_patch_heatmap(rollout)
+        assert rollout_to_patch_heatmap(rollout, patch_grid_hw=(2, 6)).shape == (2, 6)

@@ -25,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from lerobot_attention_visualizer import GR00TAttention
+from lerobot_attention_visualizer import GR00TAttention, GR00TN1d6Attention
 from lerobot_attention_visualizer.policies.smolvla import VisionAttentionCapture
 from lerobot_attention_visualizer.visualizer import overlay as overlay_mod
 from lerobot_attention_visualizer.visualizer.overlay import rollout_to_patch_heatmap
@@ -434,3 +434,142 @@ class TestGR00TPatchGrid:
             rollouts = capture.drain_rollouts()
         heatmap = rollout_to_patch_heatmap(rollouts[0])
         assert heatmap.shape == (27, 27)
+
+
+# ---------------------------------------------------------------------------
+# GR00TN1d6Attention — N1.6 (Eagle3-VL: SigLIP2 + Qwen3) attribute paths
+# ---------------------------------------------------------------------------
+
+def _vl_input_n16(num_cameras: int, vision_per_cam: int, n_text: int = 2):
+    """N1.6 backbone input: uses `input_ids` (not `eagle_input_ids`)."""
+    ids: list[int] = []
+    for _ in range(num_cameras):
+        ids.extend([1] * n_text)
+        ids.extend([IMAGE_TOKEN_INDEX] * vision_per_cam)
+    return {"input_ids": torch.tensor([ids])}
+
+
+def _make_mock_groot_n16_policy(
+    num_cameras: int = 2,
+    num_patches: int = 16,
+    embed_dim: int = 64,
+    num_heads: int = 8,
+    num_layers: int = 4,
+    *,
+    vision_per_cam: int = 4,
+    n_text: int = 2,
+    dit_query_dim: int = 32,
+    dit_kv_dim: int = 48,
+    dit_heads: int = 4,
+    dit_layers: int = 4,
+):
+    """Mock matching the VERIFIED N1.6 paths:
+
+        policy.model.backbone.model.vision_model            (NOT backbone.eagle_model)
+        policy.model.backbone.forward  -> returns image_mask (NOT forward_eagle)
+        policy.model.backbone.model.config.image_token_index
+        policy.model.action_head.model.transformer_blocks   (diffusers Attention)
+    """
+    vision_model = _SigLIPVisionModel(num_layers, embed_dim, num_heads)
+    forward_calls: list = []
+    seq_len = num_cameras * (n_text + vision_per_cam)
+
+    def backbone_forward(vl_input):
+        # Fire the SigLIP2 q/k hooks for all cameras (batched), like the real fwd.
+        vision_model(torch.randn(num_cameras, num_patches, embed_dim))
+        forward_calls.append(vl_input)
+        input_ids = vl_input["input_ids"]
+        return {
+            "backbone_features": torch.randn(1, seq_len, dit_kv_dim),
+            "backbone_attention_mask": torch.ones(1, seq_len, dtype=torch.bool),
+            "image_mask": input_ids == IMAGE_TOKEN_INDEX,  # (1, seq_len)
+        }
+
+    eagle3 = SimpleNamespace(
+        vision_model=vision_model,
+        config=SimpleNamespace(image_token_index=IMAGE_TOKEN_INDEX),
+    )
+    backbone = SimpleNamespace(model=eagle3, forward=backbone_forward)
+    action_head = SimpleNamespace(model=_MockDiT(dit_query_dim, dit_kv_dim, dit_heads, dit_layers))
+    model = SimpleNamespace(backbone=backbone, action_head=action_head)
+    policy = SimpleNamespace(model=model)
+    return policy, forward_calls
+
+
+class TestGR00TN1d6Attention:
+    def test_init_resolves_n16_vision_path(self):
+        # Must reach backbone.model.vision_model (not backbone.eagle_model) and
+        # hook every SigLIP2 attention layer.
+        policy, _ = _make_mock_groot_n16_policy(num_cameras=2, num_layers=4)
+        viz = GR00TN1d6Attention(policy, camera_keys=["external_D455", "ego"])
+        assert len(viz._capture._attn_modules) == 4
+        assert viz._forward_attr == "forward"
+
+    def test_enter_patches_backbone_forward(self):
+        policy, _ = _make_mock_groot_n16_policy(num_cameras=2)
+        original = policy.model.backbone.forward
+        viz = GR00TN1d6Attention(policy, camera_keys=["external_D455", "ego"])
+        with viz:
+            assert policy.model.backbone.forward is not original
+            # 2 cross blocks (of 4 interleaved) × (q + k) = 4 hooks.
+            assert len(viz._cross._handles) == 4
+        assert policy.model.backbone.forward is original
+
+    def test_forward_reads_returned_image_mask(self):
+        vision_per_cam = 4
+        policy, calls = _make_mock_groot_n16_policy(num_cameras=2, vision_per_cam=vision_per_cam)
+        viz = GR00TN1d6Attention(policy, camera_keys=["external_D455", "ego"])
+        with viz:
+            policy.model.backbone.forward(_vl_input_n16(2, vision_per_cam))
+            assert len(calls) == 1
+            assert viz._vision_mask is not None
+            assert int(viz._vision_mask.sum()) == 2 * vision_per_cam
+
+    def test_image_token_index_from_model_config(self):
+        policy, _ = _make_mock_groot_n16_policy()
+        viz = GR00TN1d6Attention(policy, camera_keys=["external_D455", "ego"])
+        assert viz._image_token_index() == IMAGE_TOKEN_INDEX
+
+    def test_action_overlay_with_rectangular_grid(self, monkeypatch):
+        # 6 vision tokens/camera → non-square; patch_grid_hw=(2,3) must reshape it.
+        logged: list[str] = []
+        monkeypatch.setattr(overlay_mod.rr, "log", lambda path, *a, **k: logged.append(path))
+
+        num_cameras, vision_per_cam = 2, 6
+        policy, _ = _make_mock_groot_n16_policy(
+            num_cameras=num_cameras, vision_per_cam=vision_per_cam,
+            dit_query_dim=32, dit_kv_dim=48, dit_layers=4,
+        )
+        viz = GR00TN1d6Attention(
+            policy, camera_keys=["external_D455", "ego"], patch_grid_hw=(2, 3)
+        )
+        dit = policy.model.action_head.model
+        with viz:
+            vl_in = _vl_input_n16(num_cameras, vision_per_cam)
+            policy.model.backbone.forward(vl_in)
+            seq_len = vl_in["input_ids"].shape[1]
+            dit.run_denoiser(torch.randn(1, 6, 32), torch.randn(1, seq_len, 48), steps=3)
+            obs = {c: np.zeros((48, 48, 3), dtype=np.uint8) for c in ["external_D455", "ego"]}
+            viz.log_overlay(obs)
+
+        action_paths = [p for p in logged if "/action/" in p]
+        assert len(action_paths) == 6  # 3 streams × 2 cameras
+        assert any("external_D455/action/overlay" in p for p in action_paths)
+
+    def test_rectangular_grid_dropped_without_patch_grid_hw(self, monkeypatch):
+        # Same non-square case but no patch_grid_hw → square inference fails → no
+        # action overlay (frame dropped), rather than a crash.
+        logged: list[str] = []
+        monkeypatch.setattr(overlay_mod.rr, "log", lambda path, *a, **k: logged.append(path))
+
+        policy, _ = _make_mock_groot_n16_policy(num_cameras=2, vision_per_cam=6)
+        viz = GR00TN1d6Attention(policy, camera_keys=["external_D455", "ego"])  # no grid
+        dit = policy.model.action_head.model
+        with viz:
+            vl_in = _vl_input_n16(2, 6)
+            policy.model.backbone.forward(vl_in)
+            seq_len = vl_in["input_ids"].shape[1]
+            dit.run_denoiser(torch.randn(1, 6, 32), torch.randn(1, seq_len, 48), steps=2)
+            obs = {c: np.zeros((48, 48, 3), dtype=np.uint8) for c in ["external_D455", "ego"]}
+            viz.log_overlay(obs)
+        assert [p for p in logged if "/action/" in p] == []

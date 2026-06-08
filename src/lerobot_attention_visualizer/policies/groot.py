@@ -1,58 +1,46 @@
-"""Groot attention capture — Eagle-2 VLM backbone wrapper.
+"""Groot attention capture — Eagle VLM backbone wrappers (N1.5 and N1.6).
 
-Two adapters are provided:
+Two adapters, sharing the `_EagleCrossAttention` base:
 
-GR00TAttention
-    Wraps lerobot's `GrootPolicy` (Groot N1.5). Attribute path:
-        policy._groot_model.backbone.eagle_model.vision_model
-        policy._groot_model.action_head.model            (the cross-attn DiT)
+GR00TAttention — Groot N1.5 (lerobot `GrootPolicy`). Eagle-2 = SmolLM2 + SigLIP.
+    policy._groot_model.backbone.eagle_model.vision_model
+    policy._groot_model.action_head.model            (the cross-attn DiT)
+    backbone runs the VLM via `forward_eagle`; vision tokens recovered from
+    `eagle_input_ids == image_token_index`.
 
-GR00TN1d6Attention
-    Wraps Isaac-GR00T's native `Gr00tPolicy` (Groot N1.6 / Gr00tN1d6).
-    The native loader registers `Gr00tN1d6` with HuggingFace AutoModel;
-    lerobot's `GrootPolicy.from_pretrained` cannot load N1.6 checkpoints.
-    Assumed attribute path (INHERITED FROM N1.5 — SEE WARNING BELOW):
-        policy.model.backbone.eagle_model.vision_model
-        policy.model.action_head.model
+GR00TN1d6Attention — Groot N1.6 (Isaac-GR00T native `Gr00tPolicy`). Eagle3-VL =
+    SigLIP2 + Qwen3 ("AlternateVLDiT" action head). Paths verified against the
+    Isaac-GR00T `n1.6-release` source and a real `Gr00tN1d6` checkpoint:
+    policy.model.backbone.model.vision_model           (NOT backbone.eagle_model)
+    policy.model.action_head.model.transformer_blocks  (diffusers Attention)
+    backbone runs the VLM via plain `forward`, which returns `image_mask`
+    directly; token index at `backbone.model.config.image_token_index`.
 
-    !!! N1.6 ARCHITECTURE IS NOT THE SAME AS N1.5 — PATHS UNVERIFIED !!!
-    N1.5 uses the Eagle-2 VLM (SmolLM2 LLM + SigLIP). N1.6 swapped to a
-    **SigLIP2 vision encoder + Qwen3 language model** with a reworked VL→DiT
-    connector; its action head is the "AlternateVLDiT" (still a cross-attention
-    flow-matching DiT that interleaves cross-attn every 2 blocks, so the
-    `CrossAttentionCapture` *approach* still applies). BUT the module paths
-    above and the image-token mask (`eagle_input_ids == image_token_index`,
-    Eagle/InternVL-style) are copied from N1.5 and have NOT been verified
-    against a real N1.6 checkpoint. Run a `policy.model` module-tree probe and
-    fix the paths before trusting N1.6 maps. Tracked on branch `groot_n16`.
-
-The N1.5 `GR00TAttention` below is verified; only N1.6 is provisional. They
-currently share the `_EagleCrossAttention` base on the (unconfirmed) assumption
-that the vision-encoder + cross-attn-DiT layout carries over.
+The base only differs between the two in three small hooks (`_forward_attr`,
+`_image_token_index`, `_extract_vision_mask`); everything else is shared.
 
 # Two complementary signals
 
-This adapter streams **two** overlays per camera:
+Each adapter streams **two** overlays per camera:
 
 `attention/<cam>/encoder/*`
-    SigLIP vision-encoder self-attention rollout — "which patches the (usually
-    frozen) image encoder finds salient to represent." Captured via
-    `VisionAttentionCapture` + `snapshot_split` (Eagle batches all cameras into
-    one `forward_eagle`, so Q/K emerge as `(N_cameras, n_patches, dim)` and we
-    slice along dim 0).
+    Vision-encoder (SigLIP/SigLIP2) self-attention rollout — "which patches the
+    (usually frozen) image encoder finds salient." Captured via
+    `VisionAttentionCapture` + `snapshot_split`. Best-effort on N1.6: SigLIP2
+    tiles at native resolution, so if the per-image patch grid isn't square the
+    encoder overlay is skipped (the action overlay below is the key signal).
 
 `attention/<cam>/action/*`
     Action-head cross-attention — "which vision tokens the flow-matching
     denoiser actually looks at while producing the action." Captured via
     `CrossAttentionCapture` on the DiT's cross-attending blocks. This is the
-    signal that changes when you fine-tune the action head, so it is the one to
-    watch for grounding bugs. See `cross_attention.py` for the mechanism.
+    signal that changes when you fine-tune the action head — the one to watch
+    for grounding bugs. See `cross_attention.py`.
 
-The vision tokens the action head attends to are NOT the 729 raw SigLIP patches:
-Eagle pixel-shuffles them down (downsample 0.5 → 256 tokens, a 16×16 grid per
-camera) before they enter the LLM sequence. We recover their columns from
-`eagle_input_ids == image_token_index`, captured inside the patched
-`forward_eagle`.
+The action head attends to the post-projection vision tokens, not the raw
+SigLIP patches. We recover their columns from the image-token mask and reshape
+per camera (square by default; pass `patch_grid_hw` for N1.6's native-resolution
+rectangular grids).
 """
 
 from __future__ import annotations
@@ -87,6 +75,10 @@ class _EagleCrossAttention:
     both overlays — is shared here.
     """
 
+    # Name of the backbone method that runs the Eagle VLM forward. N1.5 exposes
+    # `forward_eagle`; N1.6 runs it as the backbone's plain `forward`.
+    _forward_attr: str = "forward_eagle"
+
     def __init__(
         self,
         policy,
@@ -95,15 +87,22 @@ class _EagleCrossAttention:
         model_root,
         last_layer_only: bool,
         cross_attention: bool,
+        patch_grid_hw: tuple[int, int] | None = None,
     ):
         self.policy = policy
         self._model_root = model_root
         self._last_layer_only = last_layer_only
         self._cross_enabled = cross_attention
+        # Per-camera (h, w) for the action-overlay vision-token grid. None = infer
+        # a square grid. Needed when the vision tower tiles at native resolution
+        # (N1.6) and the per-camera token count isn't a perfect square.
+        self._patch_grid_hw = patch_grid_hw
 
         self._capture = VisionAttentionCapture(vision_model)
         self._cross: CrossAttentionCapture | None = None
-        self._orig_forward_eagle = None
+        # (attr_name, original_callable) of the patched backbone forward.
+        self._orig_forward: tuple[str, object] | None = None
+        self._img_tok: int | None = None
         # Vision-token column mask over the VL key sequence, captured per forward.
         self._vision_mask = None
 
@@ -111,49 +110,59 @@ class _EagleCrossAttention:
         raise NotImplementedError
 
     def _image_token_index(self) -> int:
-        """The token id Eagle replaces with vision embeddings (input_ids == this)."""
+        """The token id the VLM replaces with vision embeddings (input_ids == this).
+
+        N1.5 default: read off the Eagle-2 model. N1.6 overrides this.
+        """
         eagle_model = self._model_root.backbone.eagle_model
         idx = getattr(eagle_model, "image_token_index", None)
         if idx is None:
             idx = eagle_model.config.image_token_index
         return idx
 
+    def _extract_vision_mask(self, vl_input, result):
+        """Boolean (seq,) mask of vision-token columns in the VL key sequence.
+
+        N1.5 default: rebuild from the eagle input ids. N1.6 overrides to read the
+        `image_mask` the backbone returns directly.
+        """
+        input_ids = vl_input["eagle_input_ids"]
+        return (input_ids[0] == self._img_tok).detach().cpu()
+
     def __enter__(self) -> "_EagleCrossAttention":
         self._capture.__enter__()
         n_cameras = len(self.camera_keys())
         backbone = self._model_root.backbone
-        orig = backbone.forward_eagle
-        self._orig_forward_eagle = orig
+        fwd_attr = self._forward_attr
+        orig = getattr(backbone, fwd_attr)
+        self._orig_forward = (fwd_attr, orig)
         capture = self._capture
 
-        img_tok = None
         if self._cross_enabled:
             cross_blocks = find_cross_attention_blocks(
                 self._model_root.action_head.model.transformer_blocks
             )
             self._cross = CrossAttentionCapture(cross_blocks)
             self._cross.__enter__()
-            img_tok = self._image_token_index()
+            self._img_tok = self._image_token_index()
 
-        def _patched_forward_eagle(vl_input):
-            result = orig(vl_input)
-            # Q/K shape here: (N_cameras, n_patches, embed_dim). snapshot_split
-            # slices dim 0 into one _LayerCache per camera for the encoder path.
+        def _patched_forward(vl_input, *args, **kwargs):
+            result = orig(vl_input, *args, **kwargs)
+            # Encoder path: Q/K are (N_cameras, n_patches, dim) for a batched
+            # vision forward; snapshot_split slices dim 0 per camera.
             capture.snapshot_split(n_cameras)
             if self._cross is not None:
-                # Vision tokens are the columns of the VL key sequence where the
-                # eagle input id is the image placeholder. Order is camera-major.
-                input_ids = vl_input["eagle_input_ids"]
-                self._vision_mask = (input_ids[0] == img_tok).detach().cpu()
+                self._vision_mask = self._extract_vision_mask(vl_input, result)
             return result
 
-        backbone.forward_eagle = _patched_forward_eagle
+        setattr(backbone, fwd_attr, _patched_forward)
         return self
 
     def __exit__(self, *exc) -> None:
-        if self._orig_forward_eagle is not None:
-            self._model_root.backbone.forward_eagle = self._orig_forward_eagle
-            self._orig_forward_eagle = None
+        if self._orig_forward is not None:
+            attr, orig = self._orig_forward
+            setattr(self._model_root.backbone, attr, orig)
+            self._orig_forward = None
         self._capture.__exit__(*exc)
         if self._cross is not None:
             self._cross.__exit__(*exc)
@@ -190,7 +199,13 @@ class _EagleCrossAttention:
                 image = obs.get(cam_key)
                 if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
                     continue
-                patch_heat = rollout_to_patch_heatmap(rollout)
+                try:
+                    patch_heat = rollout_to_patch_heatmap(rollout)
+                except ValueError:
+                    # Non-square encoder patch grid (e.g. N1.6 native-resolution
+                    # SigLIP2). The encoder view is best-effort; skip it rather
+                    # than crash — the action overlay below is the key signal.
+                    continue
                 heat = patch_heatmap_to_image(
                     patch_heat,
                     target_hw=image.shape[:2],
@@ -203,7 +218,9 @@ class _EagleCrossAttention:
         # --- Action-head cross-attention (the action-driving signal) ---
         importance = self._cross.drain() if self._cross is not None else None
         if importance is not None and self._vision_mask is not None:
-            grids = vision_importance_to_grids(importance, self._vision_mask, n)
+            grids = vision_importance_to_grids(
+                importance, self._vision_mask, n, grid_hw=self._patch_grid_hw
+            )
             if len(grids) == n:
                 for cam_key, grid in zip(camera_keys, grids, strict=True):
                     image = obs.get(cam_key)
@@ -257,34 +274,36 @@ class GR00TAttention(_EagleCrossAttention):
 
 
 class GR00TN1d6Attention(_EagleCrossAttention):
-    """High-level: Isaac-GR00T Gr00tPolicy (N1.6) wrapper streaming both overlays.
+    """High-level: Isaac-GR00T Gr00tPolicy (N1.6 / Gr00tN1d6) wrapper.
 
-    Use this for checkpoints with `"model_type": "Gr00tN1d6"` loaded via:
+    Use this for checkpoints with `"model_type": "Gr00tN1d6"` (Eagle3-VL =
+    SigLIP2 + Qwen3), loaded via Isaac-GR00T:
 
         from gr00t.policy.gr00t_policy import Gr00tPolicy
-        policy = Gr00tPolicy(
-            model_path="nvidia/GR00T-N1.6-3B",
-            embodiment_tag="new_embodiment",
-            device="cuda",
-        )
-        viz = GR00TN1d6Attention(policy, camera_keys=["ego", "external"])
+        policy = Gr00tPolicy(model_path=..., embodiment_tag="new_embodiment", device="cuda")
+        viz = GR00TN1d6Attention(policy, camera_keys=["external_D455", "ego"])
         with viz:
             action = policy.get_action(obs)
             viz.log_overlay(obs)
 
-    camera_keys must match the bare names used in your obs dict (e.g. "ego",
-    "external" — without the "observation.images." prefix).
+    `camera_keys` are the bare obs-dict names for your embodiment (e.g.
+    `["external_D455", "ego"]`), in feed order.
 
-    The Isaac-GR00T `Gr00tPolicy` stores the loaded model at `policy.model`
-    (not `policy._groot_model`).
+    Paths verified against the Isaac-GR00T `n1.6-release` source and a real
+    `Gr00tN1d6` checkpoint (`model.safetensors.index.json`):
+      - vision encoder: `policy.model.backbone.model.vision_model`
+      - action DiT:      `policy.model.action_head.model.transformer_blocks`
+      - N1.6's `EagleBackbone.forward` returns `image_mask` directly, so we read
+        that instead of rebuilding from input ids; the token index lives at
+        `backbone.model.config.image_token_index`.
 
-    PROVISIONAL: the `policy.model.backbone.eagle_model.vision_model` and
-    `action_head.model.transformer_blocks` paths below are inherited from N1.5
-    and are NOT confirmed for N1.6 (SigLIP2 + Qwen3, not Eagle-2). They will
-    raise `AttributeError` if N1.6 renamed/restructured the backbone. Verify
-    against a real N1.6 module tree and adjust before relying on the maps — see
-    the module docstring and branch `groot_n16`.
+    `patch_grid_hw`: N1.6's SigLIP2 tiles at native resolution, so the per-camera
+    vision-token count may not be a perfect square. Pass the per-camera grid
+    `(h, w)` (read it once from a real forward — see `examples/visualize_groot_n16.py`)
+    to get a correctly-shaped action overlay; leave it None to infer a square grid.
     """
+
+    _forward_attr = "forward"  # N1.6 backbone runs the VLM in plain forward()
 
     def __init__(
         self,
@@ -293,15 +312,37 @@ class GR00TN1d6Attention(_EagleCrossAttention):
         camera_keys: list[str],
         last_layer_only: bool = False,
         cross_attention: bool = True,
+        patch_grid_hw: tuple[int, int] | None = None,
     ):
         super().__init__(
             policy,
-            vision_model=policy.model.backbone.eagle_model.vision_model,
+            vision_model=policy.model.backbone.model.vision_model,
             model_root=policy.model,
             last_layer_only=last_layer_only,
             cross_attention=cross_attention,
+            patch_grid_hw=patch_grid_hw,
         )
         self._camera_keys = camera_keys
 
     def camera_keys(self) -> list[str]:
         return self._camera_keys
+
+    def _image_token_index(self) -> int:
+        # Eagle3-VL exposes it on the model config.
+        cfg = self._model_root.backbone.model.config
+        idx = getattr(cfg, "image_token_index", None)
+        if idx is None:
+            idx = self._model_root.backbone.model.image_token_index
+        return idx
+
+    def _extract_vision_mask(self, vl_input, result):
+        # N1.6's EagleBackbone.forward returns a BatchFeature with `image_mask`
+        # (input_ids == image_token_index). Prefer it; fall back to input_ids.
+        mask = None
+        try:
+            mask = result["image_mask"]
+        except (KeyError, TypeError):
+            mask = getattr(result, "image_mask", None)
+        if mask is not None:
+            return mask[0].detach().cpu()
+        return (vl_input["input_ids"][0] == self._img_tok).detach().cpu()

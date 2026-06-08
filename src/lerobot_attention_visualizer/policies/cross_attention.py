@@ -156,10 +156,12 @@ def find_cross_attention_blocks(
 ) -> list[torch.nn.Module]:
     """Return the attention submodules that perform cross-attention.
 
-    A diffusers `Attention` is cross-attending when its key projection consumes a
-    different feature dim than its query projection (`cross_attention_dim` ≠
-    `query_dim`). This is a static, version-independent test — more robust than
-    relying on the optional `is_cross_attention` flag.
+    Detection prefers diffusers' own `attn.is_cross_attention` flag (set whenever
+    `cross_attention_dim is not None`), which is reliable even when the cross dim
+    happens to equal the query dim. When that flag is absent (e.g. a non-diffusers
+    module or a bare mock), it falls back to the structural test that the key
+    projection consumes a different feature dim than the query projection
+    (`cross_attention_dim ≠ query_dim`).
     """
     hits: list[torch.nn.Module] = []
     for block in transformer_blocks:
@@ -170,8 +172,12 @@ def find_cross_attention_blocks(
         k_proj = getattr(attn, k_attr, None)
         if q_proj is None or k_proj is None:
             continue
-        if q_proj.in_features != k_proj.in_features:
+        is_cross = getattr(attn, "is_cross_attention", None)
+        if is_cross is True:
             hits.append(attn)
+        elif is_cross is None and q_proj.in_features != k_proj.in_features:
+            hits.append(attn)
+        # is_cross is False → explicit self-attention, skip.
     return hits
 
 
@@ -179,6 +185,7 @@ def vision_importance_to_grids(
     importance: torch.Tensor,
     vision_mask: torch.Tensor,
     n_cameras: int,
+    grid_hw: tuple[int, int] | None = None,
 ) -> list[torch.Tensor]:
     """Slice a per-VL-token importance vector to vision tokens and reshape per camera.
 
@@ -188,16 +195,25 @@ def vision_importance_to_grids(
             (i.e. input_ids == image_token_index). Image tokens appear in camera
             order, one contiguous block per camera.
         n_cameras: number of cameras (the vision tokens split evenly across them).
+        grid_hw: explicit per-camera patch grid `(h, w)`. Required when the grid
+            isn't square (e.g. N1.6 native-resolution tiling). If None, a square
+            grid is inferred.
 
-    Returns one (side, side) heatmap tensor per camera, or [] if the counts don't
-    divide into equal square grids (caller should drop the frame).
+    Returns one (h, w) heatmap tensor per camera, or [] if the counts don't
+    divide evenly / match the grid (caller should drop the frame).
     """
     vis = importance[vision_mask]
     n = vis.numel()
     if n == 0 or n % n_cameras != 0:
         return []
     per_cam = n // n_cameras
-    side = int(round(per_cam**0.5))
-    if side * side != per_cam:
-        return []
-    return [vis[c * per_cam : (c + 1) * per_cam].view(side, side) for c in range(n_cameras)]
+    if grid_hw is not None:
+        h, w = grid_hw
+        if h * w != per_cam:
+            return []
+    else:
+        side = int(round(per_cam**0.5))
+        if side * side != per_cam:
+            return []
+        h = w = side
+    return [vis[c * per_cam : (c + 1) * per_cam].view(h, w) for c in range(n_cameras)]

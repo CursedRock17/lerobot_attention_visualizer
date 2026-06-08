@@ -208,3 +208,60 @@ class TestVisionImportanceToGrids:
         importance = torch.arange(5, dtype=torch.float32)
         vision_mask = torch.zeros(5, dtype=torch.bool)
         assert vision_importance_to_grids(importance, vision_mask, n_cameras=1) == []
+
+
+# ---------------------------------------------------------------------------
+# is_cross_attention preference + rectangular grids (N1.6 hardening)
+# ---------------------------------------------------------------------------
+
+class _FlaggedAttn(nn.Module):
+    """diffusers-like Attention exposing the `is_cross_attention` flag."""
+
+    def __init__(self, query_dim, kv_dim, is_cross, heads=4):
+        super().__init__()
+        self.heads = heads
+        self.is_cross_attention = is_cross
+        self.to_q = nn.Linear(query_dim, query_dim, bias=False)
+        self.to_k = nn.Linear(kv_dim, query_dim, bias=False)
+        self.to_v = nn.Linear(kv_dim, query_dim, bias=False)
+
+
+class _FlaggedBlock(nn.Module):
+    def __init__(self, attn):
+        super().__init__()
+        self.attn1 = attn
+
+
+class TestIsCrossAttentionPreference:
+    def test_flag_true_detected_even_when_dims_equal(self):
+        # cross_attention_dim == query_dim → in_features heuristic can't tell,
+        # but the is_cross_attention flag still flags it.
+        block = _FlaggedBlock(_FlaggedAttn(64, 64, is_cross=True))
+        assert find_cross_attention_blocks([block]) == [block.attn1]
+
+    def test_flag_false_skipped_even_when_dims_differ(self):
+        # Explicit self-attention; ignore the in_features mismatch.
+        block = _FlaggedBlock(_FlaggedAttn(64, 96, is_cross=False))
+        assert find_cross_attention_blocks([block]) == []
+
+
+class TestRectangularGrids:
+    def test_explicit_rectangular_grid(self):
+        # 12 vision tokens, 1 camera, (3, 4) grid.
+        importance = torch.arange(12, dtype=torch.float32)
+        mask = torch.ones(12, dtype=torch.bool)
+        grids = vision_importance_to_grids(importance, mask, n_cameras=1, grid_hw=(3, 4))
+        assert len(grids) == 1 and grids[0].shape == (3, 4)
+
+    def test_rectangular_grid_per_camera(self):
+        # 2 cameras × 6 tokens, (2, 3) each.
+        importance = torch.arange(12, dtype=torch.float32)
+        mask = torch.ones(12, dtype=torch.bool)
+        grids = vision_importance_to_grids(importance, mask, n_cameras=2, grid_hw=(2, 3))
+        assert len(grids) == 2 and all(g.shape == (2, 3) for g in grids)
+        assert grids[0].flatten().tolist() == [0, 1, 2, 3, 4, 5]
+
+    def test_grid_hw_mismatch_returns_empty(self):
+        importance = torch.arange(12, dtype=torch.float32)
+        mask = torch.ones(12, dtype=torch.bool)
+        assert vision_importance_to_grids(importance, mask, n_cameras=2, grid_hw=(2, 2)) == []
