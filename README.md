@@ -161,23 +161,42 @@ pip install 'lerobot[smolvla,feetech] @ git+https://github.com/huggingface/lerob
 pip install -e '.[smolvla,feetech]'
 ```
 
-### Groot N1.6
+### Groot N1.6 (verified GB10 / Blackwell stack)
 
-Groot requires `flash-attn`, a CUDA C++ extension that must be compiled from
-source and is not available as a wheel on PyPI. Install it separately before
-installing this package:
+Groot N1.6 is **not** loadable through lerobot's `GrootPolicy` — it's an
+Isaac-GR00T-native `Gr00tPolicy` (Eagle3-VL = SigLIP2 + Qwen3). The
+known-good environment is NVIDIA's Blackwell (GB10) image; mirror these exact
+versions. Canonical reference:
+[`Dockerfile.blackwell`](https://github.com/CursedRock17/Sim-to-Real-SO-101-Workshop/blob/gb10_current/docker/real/Dockerfile.blackwell).
+
+| Component | Pin |
+| --- | --- |
+| Base image | `nvidia/cuda:13.0.0-devel-ubuntu24.04` |
+| Python | `3.10` (deadsnakes PPA) |
+| torch / torchvision / torchaudio | nightly, `--index-url https://download.pytorch.org/whl/nightly/cu130` |
+| flash-attn | built `--no-build-isolation` |
+| transformers / tokenizers | `==4.51.3` / `==0.21.4` |
+| diffusers | `>=0.27.2,<0.36.0` |
+| numpy | `==1.26.0` |
+| Isaac-GR00T | `@ ead52833afbbf4243f8cd5e7664f48a94de03b19` (`pip install -e . --no-deps`) |
+| lerobot | `@ e670ac5daf9b76` (`pip install -e . --no-deps`) |
 
 ```bash
-# Requires: CUDA toolkit, C++ compiler, and ~20 min build time.
-pip install flash-attn --no-build-isolation
-
-# Then install lerobot's groot extra and this package:
-pip install 'lerobot[groot]>=0.5.1,<0.6.0'
-pip install lerobot-attention-visualizer       # or -e . from source
+# Install this package on the N1.6 branch (matches the workshop image):
+git clone https://github.com/CursedRock17/lerobot_attention_visualizer.git
+cd lerobot_attention_visualizer && git checkout groot_n16
+python3 -m pip install --no-deps -e '.[smolvla]'
 ```
 
-For detailed environment setup (CUDA version pinning, pre-built wheels if
-available), follow [NVIDIA's Isaac-GR00T install guide](https://github.com/NVIDIA/Isaac-GR00T).
+> **`--no-deps` gotcha.** The workshop image installs everything with
+> `--no-deps` to protect its pinned versions, so this package's declared
+> dependencies are **not** pulled in — including **`rerun-sdk`**, which the
+> visualizer needs to render. Add it to your explicit pin list:
+> `pip install 'rerun-sdk>=0.20'`. (`torch`/`numpy`/`lerobot` are already
+> provided by the image.)
+
+For detailed environment setup, follow
+[NVIDIA's Isaac-GR00T install guide](https://github.com/NVIDIA/Isaac-GR00T).
 
 ## Run the examples
 
