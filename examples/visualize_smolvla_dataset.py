@@ -50,12 +50,15 @@ DATASET_REPO_ID  = "lerobot/svla_so101_pickplace"
 TASK_DESCRIPTION = "pink lego brick into the transparent box"
 
 EPISODE_IDX = 45         # which episode to replay
-LAST_LAYER_ONLY = True  # True = crisper maps; False = full attention rollout
+# False = full attention rollout (the faithful aggregate across layers).
+# True = raw last-layer self-attention, dominated by SigLIP attention-sink /
+# register patches (reads as splotchy noise) — only for inspecting one layer.
+LAST_LAYER_ONLY = False
 PLAYBACK_FPS = 30       # pacing; set to None to run as fast as possible
-# Clip the top (100 - CLIP_PERCENTILE)% before normalizing the heatmap.
-# Suppresses SigLIP's structural edge hot spots so the object being manipulated
-# fills the color scale. Lower = more clipping; 100 = plain min-max.
-CLIP_PERCENTILE = 95.0
+# Normalization: 100 = faithful min-max (the accurate 0-1 grid). Lowering it
+# clips the top (100 - CLIP_PERCENTILE)% first — a readability aid that trades
+# faithfulness to stop SigLIP edge/sink artifacts dominating the color scale.
+CLIP_PERCENTILE = 100.0
 # ---------------------------------------------------------------------------
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

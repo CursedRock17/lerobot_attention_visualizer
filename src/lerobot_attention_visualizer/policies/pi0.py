@@ -122,7 +122,7 @@ class Pi0Attention:
             if k.startswith(prefix)
         ]
 
-    def log_overlay(self, obs: dict, *, prefix: str = "attention", clip_percentile: float = 95.0) -> None:
+    def log_overlay(self, obs: dict, *, prefix: str = "attention", clip_percentile: float = 100.0) -> None:
         """Compute rollouts from pending snapshots, then stream image / heatmap / overlay per camera.
 
         Rollout compute happens here — after merge() — so it doesn't inflate

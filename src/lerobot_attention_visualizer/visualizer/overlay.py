@@ -14,9 +14,17 @@ def rollout_to_patch_heatmap(rollout: torch.Tensor) -> torch.Tensor:
     """Reduce a (seq, seq) rollout into a (patch_grid_h, patch_grid_w) heatmap.
 
     SigLIP / Idefics3 vision tokens are a flat sequence of patches with no CLS
-    token. We therefore summarize per-patch importance as the total attention
-    flowing OUT of each patch (row-sum over the rollout). This is the standard
-    trick when the encoder has no class token to query against.
+    token. The choice of reduction must match what the model actually *consumes*:
+
+    - A classifier ViT reads the pooled/CLS token, so its faithful map is the
+      CLS *row* of the attention matrix (what the class query attends to). This
+      is what timm-style visualizers use.
+    - A VLA is different: `embed_image` feeds **every** patch token onward
+      (vision_model.last_hidden_state → connector → LLM); the pooled/probe
+      output is discarded. So the faithful per-patch importance is how much each
+      input patch contributes across *all* output tokens — the **column-mean**
+      of the rollout (`mean(dim=0)`, since `rollout[i, j]` is query i attending
+      to key j). That is the reduction used here.
     """
     if rollout.ndim == 3:
         # Strip batch dim — we only ever pass batch size 1 through the policy.
@@ -38,21 +46,25 @@ def rollout_to_patch_heatmap(rollout: torch.Tensor) -> torch.Tensor:
 def patch_heatmap_to_image(
     heatmap: torch.Tensor,
     target_hw: tuple[int, int],
-    clip_percentile: float = 95.0,
+    clip_percentile: float = 100.0,
 ) -> np.ndarray:
     """Upsample a (h_p, w_p) patch heatmap to `target_hw` and normalize to [0, 1].
 
-    `clip_percentile` clips the top (100 - clip_percentile)% of values before
-    normalizing. SigLIP's learned positional embeddings create consistent hot
-    spots at edge patches; capping at the 95th percentile suppresses those
-    structural artifacts so semantic content (e.g. the object being grasped)
-    fills the color scale instead.
+    The default is a **faithful min-max** normalization (`clip_percentile=100`):
+    the grid's true min maps to 0 and its true max to 1, so the overlay is an
+    accurate depiction of the per-patch attention — no values invented or hidden.
+
+    Lowering `clip_percentile` is an OPTIONAL display aid, not the accurate map:
+    it clips the top (100 - clip_percentile)% of values before normalizing, which
+    stops SigLIP edge/attention-sink artifacts from dominating the color scale at
+    the cost of faithfulness. Reach for it only to make a map more readable.
     """
     # Add batch + channel dims for torch interpolate.
     h = heatmap.float()[None, None]  # (1, 1, H, W)
     # Bilinear upsample from patch grid to full image resolution.
     h = F.interpolate(h, size=target_hw, mode="bilinear", align_corners=False)[0, 0]
-    # Percentile-clip then normalize so positional artifacts don't dominate.
+    # Min-max normalize (clip_percentile=100). A lower percentile winsorizes the
+    # top tail first — a readability trade-off, off by default.
     lo = h.min()
     hi = torch.quantile(h.reshape(-1), clip_percentile / 100.0)
     h = (h - lo) / (hi - lo + 1e-8)
