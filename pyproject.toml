@@ -20,11 +20,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
+# Pinned to pair with lerobot v0.6.0, which requires Python >=3.12,
+# torch>=2.7,<2.12, numpy>=2.0,<2.3 and huggingface-hub>=1.0. Note that v0.6.0
+# ships a minimal default install — policy deps (incl. transformers>=5.4,<5.6)
+# come from the extras below, not from `pip install lerobot` alone.
 dependencies = [
-    "lerobot>=0.5.1,<0.6.0",
-    "numpy",
+    "lerobot>=0.6.0,<0.7.0",
+    "numpy>=2.0",
     "rerun-sdk",
-    "torch",
+    "torch>=2.7",
 ]
 
 [project.urls]
@@ -35,12 +39,12 @@ Repository = "https://github.com/CursedRock17/lerobot_attention_visualizer"
 [project.optional-dependencies]
 # Policy extras — pull lerobot's matching extras transitively. ACT has no
 # extra (it's in core lerobot), so there's no `act` key here.
-smolvla = ["lerobot[smolvla]>=0.5.1,<0.6.0"]
-pi = ["lerobot[pi]>=0.5.1,<0.6.0"]
+smolvla = ["lerobot[smolvla]>=0.6.0,<0.7.0"]
+pi = ["lerobot[pi]>=0.6.0,<0.7.0"]
 # Robot / camera extras.
-feetech = ["lerobot[feetech]>=0.5.1,<0.6.0"]
-aloha = ["lerobot[aloha]>=0.5.1,<0.6.0"]
-intelrealsense = ["lerobot[intelrealsense]>=0.5.1,<0.6.0"]
+feetech = ["lerobot[feetech]>=0.6.0,<0.7.0"]
+aloha = ["lerobot[aloha]>=0.6.0,<0.7.0"]
+intelrealsense = ["lerobot[intelrealsense]>=0.6.0,<0.7.0"]
 # Convenience bundle — installs all supported policy + hardware extras.
 all = ["lerobot-attention-visualizer[smolvla,pi,feetech,aloha,intelrealsense]"]
 # Development tooling.

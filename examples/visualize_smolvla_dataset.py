@@ -59,6 +59,14 @@ PLAYBACK_FPS = 30       # pacing; set to None to run as fast as possible
 # clips the top (100 - CLIP_PERCENTILE)% first — a readability aid that trades
 # faithfulness to stop SigLIP edge/sink artifacts dominating the color scale.
 CLIP_PERCENTILE = 100.0
+# Optional readability aids — all off by default so the map stays faithful.
+# Winsorize SigLIP attention-sink / register spikes (median + 6·MAD):
+SUPPRESS_OUTLIERS = False
+# Display contrast: 1.0 = linear/faithful; >1 crushes background, isolates the
+# hot spot (try 2-4):
+GAMMA = 1.0
+# Palette (recolors the same values): "hot" | "blue-green" | "viridis"
+COLORMAP = "hot"
 # ---------------------------------------------------------------------------
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -146,7 +154,13 @@ with viz:
             policy.predict_action_chunk(batch)
 
         # drain_rollouts() + rr.log() happen here, outside the timed window.
-        viz.log_overlay(obs, clip_percentile=CLIP_PERCENTILE)
+        viz.log_overlay(
+            obs,
+            clip_percentile=CLIP_PERCENTILE,
+            suppress_outliers=SUPPRESS_OUTLIERS,
+            gamma=GAMMA,
+            colormap=COLORMAP,
+        )
 
         step = frame_idx + 1
         if step % 10 == 0:

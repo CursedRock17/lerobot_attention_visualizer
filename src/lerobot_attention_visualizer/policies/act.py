@@ -148,12 +148,23 @@ class ACTAttention:
             if k.startswith(prefix)
         ]
 
-    def log_overlay(self, obs: dict, *, prefix: str = "attention") -> None:
+    def log_overlay(
+        self,
+        obs: dict,
+        *,
+        prefix: str = "attention",
+        gamma: float = 1.0,
+        colormap: str = "hot",
+    ) -> None:
         """Drain captured feature maps and stream image / heatmap / overlay per camera.
 
         No-op when ACT's queue didn't refill (no fresh forward this step).
         Drift between heatmap count and camera count drops the frame rather
         than misalign overlays.
+
+        `gamma` (display contrast) and `colormap` (palette) are the display dials;
+        both default to the faithful/unchanged rendering. The SigLIP-specific
+        knobs don't apply here — ACT's map is CNN activation magnitude.
         """
         if not self._capture.feature_maps:
             return
@@ -173,5 +184,5 @@ class ACTAttention:
             # Strip batch dim — we only ever run batch size 1 here.
             heat_2d = heat[0]
             # Upsample (H', W') ResNet grid to full camera resolution.
-            heat_img = patch_heatmap_to_image(heat_2d, target_hw=image.shape[:2])
-            log_attention_overlay(f"{prefix}/{cam_key}", image, heat_img)
+            heat_img = patch_heatmap_to_image(heat_2d, target_hw=image.shape[:2], gamma=gamma)
+            log_attention_overlay(f"{prefix}/{cam_key}", image, heat_img, colormap=colormap)

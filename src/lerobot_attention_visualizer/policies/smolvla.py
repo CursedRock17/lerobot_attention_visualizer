@@ -340,7 +340,16 @@ class SmolVLAAttention:
             if k.startswith(prefix)
         ]
 
-    def log_overlay(self, obs: dict, *, prefix: str = "attention", clip_percentile: float = 100.0) -> None:
+    def log_overlay(
+        self,
+        obs: dict,
+        *,
+        prefix: str = "attention",
+        clip_percentile: float = 100.0,
+        suppress_outliers: bool = False,
+        gamma: float = 1.0,
+        colormap: str = "hot",
+    ) -> None:
         """Compute rollouts from pending snapshots, then stream image / heatmap / overlay per camera.
 
         No-op if no forward happened since the last call. Rollout compute (matmul
@@ -349,6 +358,10 @@ class SmolVLAAttention:
 
         If the rollout count drifts from the camera count (a missed hook), we drop
         the frame rather than misalign overlays.
+
+        Defaults render the faithful 0-1 map; `clip_percentile`/`suppress_outliers`/
+        `gamma` are opt-in readability aids and `colormap` picks the palette — see
+        `patch_heatmap_to_image`.
         """
         # Compute rollouts now, outside the timed inference window.
         rollouts = self._capture.drain_rollouts(last_layer_only=self._last_layer_only)
@@ -365,5 +378,11 @@ class SmolVLAAttention:
             if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
                 continue
             patch_heat = rollout_to_patch_heatmap(rollout)
-            heat = patch_heatmap_to_image(patch_heat, target_hw=image.shape[:2], clip_percentile=clip_percentile)
-            log_attention_overlay(f"{prefix}/{cam_key}", image, heat)
+            heat = patch_heatmap_to_image(
+                patch_heat,
+                target_hw=image.shape[:2],
+                clip_percentile=clip_percentile,
+                suppress_outliers=suppress_outliers,
+                gamma=gamma,
+            )
+            log_attention_overlay(f"{prefix}/{cam_key}", image, heat, colormap=colormap)
